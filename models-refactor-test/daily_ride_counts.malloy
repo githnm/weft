@@ -1,0 +1,13 @@
+source: daily_ride_counts is bigquery.table('bigquery-public-data.austin_bikeshare.daily_ride_counts') extend {
+
+  dimension: ride_date_month is ride_date.month
+
+  measure: row_count is count()
+  measure: total_daily_rides is daily_rides.sum()
+
+  view: by_ride_date is {
+    group_by: ride_date
+    aggregate: row_count, total_daily_rides
+    limit: 10
+  }
+}

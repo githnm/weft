@@ -1,0 +1,12 @@
+{
+  "active": {
+    "user_term": "active",
+    "filter": "status = 'active'",
+    "applies_to": "bikeshare_stations.malloy",
+    "proposed_at": "2026-05-27T09:43:38.443Z",
+    "question_context": "how many active stations are there?",
+    "matched_enum_values": [
+      "active"
+    ]
+  }
+}

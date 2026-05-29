@@ -1,0 +1,26 @@
+import "bikeshare_stations.malloy"
+
+source: bikeshare_trips is bigquery.table('bigquery-public-data.austin_bikeshare.bikeshare_trips') extend {
+  primary_key: trip_id
+
+  // TODO: no matching table found for bike_id
+  // join_one: bike is ??? on bike_id = ???
+  join_one: start_station is bikeshare_stations
+    on start_station_id = start_station.station_id
+  // INFERRED (confidence: medium): no FK exists in BigQuery
+  join_one: end_station is bikeshare_stations
+    on end_station_id = end_station.station_id
+  // INFERRED (confidence: medium): no FK exists in BigQuery
+
+  dimension: start_time_date is start_time::date
+  dimension: start_time_month is start_time.month
+
+  measure: row_count is count()
+  measure: total_duration_minutes is duration_minutes.sum()
+
+  view: by_subscriber_type is {
+    group_by: subscriber_type
+    aggregate: row_count, total_duration_minutes
+    limit: 10
+  }
+}

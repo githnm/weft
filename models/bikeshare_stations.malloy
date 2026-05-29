@@ -1,0 +1,21 @@
+source: bikeshare_stations is bigquery.table('bigquery-public-data.austin_bikeshare.bikeshare_stations') extend {
+  primary_key: station_id
+
+  // Source columns (all queryable — no redeclaration needed):
+  //   pk: station_id
+  //   dimension: name, status, location, address, alternate_name, property_type, number_of_docks, power_type, footprint_length, footprint_width, notes, council_district, image
+  //   time: modified_date
+  //   numeric: city_asset_number
+
+  dimension: modified_date_date is modified_date::date
+  dimension: modified_date_month is modified_date.month
+
+  measure: row_count is count()
+  measure: total_city_asset_number is city_asset_number.sum()
+
+  view: by_name is {
+    group_by: name
+    aggregate: row_count, total_city_asset_number
+    limit: 10
+  }
+}

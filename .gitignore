@@ -1,0 +1,32 @@
+# secrets & env
+.env
+.env.*
+!.env.example
+
+# dependencies & build
+node_modules/
+dist/
+*.tsbuildinfo
+
+# REAL DATA — never publish (customer emails, business data)
+prod-models/
+posthog-substrate/
+funnel-models/
+funnel-models_v2/
+funnel-models_v3/
+semantic-models/
+**/inspection.json
+**/metadata.json
+**/review.md
+**/*.jsonl
+
+# os & editor
+.DS_Store
+.vscode/
+.idea/
+*.log
+
+# generated artifacts (derived from trace/customer data — never publish)
+context-graph.html
+*-graph.html
+*.context-graph.html

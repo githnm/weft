@@ -1,0 +1,18 @@
+{
+  "students": {
+    "filter": "(subscriber_type = 'Student Membership' | 'U.T. Student Membership') and duration_minutes >= 2 and duration_minutes <= 60",
+    "applies_to": "bikeshare_trips.malloy",
+    "description": "Auto-proposed from question: \"how many trips were taken by students?\"",
+    "created_at": "2026-05-27T08:49:37.259Z",
+    "created_via": "auto-confirmed",
+    "matched_count": 11
+  },
+  "vip_customers": {
+    "filter": "subscriber_type = 'Local365 Membership' | 'Annual Membership'",
+    "applies_to": "bikeshare_trips.malloy",
+    "description": "subscribers on Local365 or Annual plans",
+    "created_at": "2026-05-27T08:50:32.682Z",
+    "created_via": "manual",
+    "matched_count": 0
+  }
+}

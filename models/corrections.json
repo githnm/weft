@@ -1,0 +1,80 @@
+{
+  "students_20260527_100431": {
+    "type": "term_update",
+    "targetTerm": "students",
+    "oldFilter": "subscriber_type = 'Student Membership' | 'U.T. Student Membership'",
+    "newFilter": "(subscriber_type = 'Student Membership' | 'U.T. Student Membership') and duration_minutes >= 2",
+    "userCorrectionText": "students should exclude trips under 2 minutes",
+    "appliedAt": "2026-05-27T10:04:31.860Z",
+    "numericImpact": {
+      "before": 1,
+      "after": 1,
+      "deltaPct": 0,
+      "queryRun": "run: bikeshare_trips -> {\n  aggregate: row_count\n  where: (subscriber_type = 'Student Membership' | 'U.T. Student Membership') and duration_minutes >= 2\n}"
+    },
+    "sessionQuestion": "how many trips were taken by students?",
+    "description": "students should exclude trips under 2 minutes"
+  },
+  "bikeshare_trips_20260527_100742": {
+    "type": "model_suggestion",
+    "targetFile": "bikeshare_trips.malloy",
+    "oldFilter": "  measure: total_duration_minutes is duration_minutes.sum()",
+    "newFilter": "  measure: total_duration_minutes is duration_minutes.sum() { where: duration_minutes <= 720 }",
+    "userCorrectionText": "total duration should exclude trips longer than 12 hours",
+    "appliedAt": "2026-05-27T10:07:42.747Z",
+    "numericImpact": null,
+    "sessionQuestion": "how many trips were taken by students?",
+    "description": "total duration should exclude trips longer than 12 hours"
+  },
+  "students_20260527_102350": {
+    "type": "term_update",
+    "targetTerm": "students",
+    "oldFilter": "subscriber_type = 'Student Membership' | 'U.T. Student Membership'",
+    "newFilter": "(subscriber_type = 'Student Membership' | 'U.T. Student Membership') and duration_minutes >= 2",
+    "userCorrectionText": "students should exclude trips under 2 minutes",
+    "appliedAt": "2026-05-27T10:23:50.357Z",
+    "numericImpact": {
+      "mode": "scalar_aggregate",
+      "rowsBefore": 1,
+      "rowsAfter": 1,
+      "rowsDeltaPct": 0,
+      "aggregates": [
+        {
+          "column": "row_count",
+          "before": 719455,
+          "after": 719455,
+          "deltaPct": 0
+        }
+      ],
+      "queryRun": "run: bikeshare_trips -> {\n  aggregate: row_count\n  where: ((subscriber_type = 'Student Membership' | 'U.T. Student Membership') and duration_minutes >= 2) and duration_minutes >= 2\n}",
+      "noImpactExplanation": "duration_minutes >= 2 excluded nothing because the minimum duration_minutes in the data is already 2"
+    },
+    "sessionQuestion": "how many trips were taken by students?",
+    "description": "students should exclude trips under 2 minutes"
+  },
+  "students_20260527_102422": {
+    "type": "term_update",
+    "targetTerm": "students",
+    "oldFilter": "(subscriber_type = 'Student Membership' | 'U.T. Student Membership') and duration_minutes >= 2",
+    "newFilter": "(subscriber_type = 'Student Membership' | 'U.T. Student Membership') and duration_minutes >= 2 and duration_minutes <= 60",
+    "userCorrectionText": "students should exclude trips longer than 60 minutes",
+    "appliedAt": "2026-05-27T10:24:22.715Z",
+    "numericImpact": {
+      "mode": "scalar_aggregate",
+      "rowsBefore": 1,
+      "rowsAfter": 1,
+      "rowsDeltaPct": 0,
+      "aggregates": [
+        {
+          "column": "row_count",
+          "before": 719455,
+          "after": 703510,
+          "deltaPct": -2.22
+        }
+      ],
+      "queryRun": "run: bikeshare_trips -> {\n  aggregate: row_count\n  where: (subscriber_type = 'Student Membership' | 'U.T. Student Membership') and duration_minutes >= 2 and duration_minutes <= 60\n}"
+    },
+    "sessionQuestion": "how many trips were taken by students?",
+    "description": "students should exclude trips longer than 60 minutes"
+  }
+}

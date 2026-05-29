@@ -1,0 +1,17 @@
+source: daily_trip_counts is bigquery.table('bigquery-public-data.austin_bikeshare.daily_trip_counts') extend {
+
+  // Source columns (all queryable — no redeclaration needed):
+  //   time: trip_date
+  //   numeric: trip_count
+
+  dimension: trip_date_month is trip_date.month
+
+  measure: row_count is count()
+  measure: total_trip_count is trip_count.sum()
+
+  view: by_trip_date is {
+    group_by: trip_date
+    aggregate: row_count, total_trip_count
+    limit: 10
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "last_question": "how many trips were taken by students?",
+  "last_source": "bikeshare_trips.malloy",
+  "last_malloy": "run: bikeshare_trips -> {\n  aggregate: row_count\n  where: (subscriber_type = 'Student Membership' | 'U.T. Student Membership') and duration_minutes >= 2\n}",
+  "last_filters": [
+    {
+      "expression": "(subscriber_type = 'Student Membership' | 'U.T. Student Membership') and duration_minutes >= 2",
+      "applied_term": "students"
+    }
+  ],
+  "last_group_by": [],
+  "last_aggregates": [
+    "row_count"
+  ],
+  "last_time_range": null,
+  "last_result_summary": {
+    "row_count": 1,
+    "first_row": {
+      "row_count": 719455
+    }
+  },
+  "last_at": "2026-05-27T10:23:08.448Z"
+}
