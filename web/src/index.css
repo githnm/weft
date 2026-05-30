@@ -1,0 +1,74 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+  Weft web — Supabase-flavored, LIGHT MODE ONLY.
+  Structure comes from thin 1px borders + whitespace, not shadows or color.
+  One restrained green accent. No dark variants anywhere.
+*/
+
+@layer base {
+  :root {
+    /* Surfaces */
+    --background: 0 0% 100%;
+    --foreground: 0 0% 9%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 0 0% 9%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 0 0% 9%;
+
+    /* Muted surfaces + secondary text */
+    --muted: 0 0% 98%;
+    --muted-foreground: 0 0% 45%;
+
+    /* Neutral hover / secondary fills */
+    --secondary: 0 0% 96%;
+    --secondary-foreground: 0 0% 9%;
+    --accent: 0 0% 96%;
+    --accent-foreground: 0 0% 9%;
+
+    /* The single accent: a muted Supabase emerald. */
+    --primary: 153 60% 40%;
+    --primary-foreground: 0 0% 100%;
+
+    /* Borders are the primary structural device — thin, light, visible. */
+    --border: 0 0% 90%;
+    --input: 0 0% 90%;
+    --ring: 153 60% 40%;
+
+    /* Calm semantic states (success reuses the one green; caveats are a soft
+       amber — informative, never alarming). No loud red. */
+    --success: 153 55% 34%;
+    --success-foreground: 0 0% 100%;
+    --success-subtle: 153 50% 96%;
+    --success-border: 153 40% 82%;
+
+    --warn: 38 60% 38%;
+    --warn-foreground: 0 0% 100%;
+    --warn-subtle: 40 70% 96%;
+    --warn-border: 40 55% 82%;
+
+    --radius: 0.5rem;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-family: theme("fontFamily.sans");
+    font-size: 14px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* Tabular, right-alignable numerics in data contexts. */
+  .font-mono {
+    font-feature-settings: "tnum" 1, "ss01" 1;
+  }
+}

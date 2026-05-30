@@ -59,6 +59,16 @@ export interface AskOptions {
   newSession?: boolean;
   /** Ignore session entirely (don't load, don't update) */
   noSession?: boolean;
+  /**
+   * Optional progress callback — fires at each pipeline stage as it happens.
+   * Used by streaming UIs (the web API's SSE). CLI/MCP omit it.
+   */
+  onStage?: (event: AskStageEvent) => void;
+}
+
+export interface AskStageEvent {
+  stage: "source_selected" | "feasibility" | "generating" | "executing" | "verifying";
+  detail?: Record<string, unknown>;
 }
 
 function addUsage(a: LLMUsage, b: LLMUsage): LLMUsage {
@@ -229,6 +239,11 @@ export async function ask(options: AskOptions): Promise<AskResult> {
     totalUsage = addUsage(totalUsage, sourceSelection.usage);
   }
 
+  options.onStage?.({
+    stage: "source_selected",
+    detail: { source: sourceSelection.sourceName, filename: sourceSelection.filename, reasoning: sourceSelection.reasoning },
+  });
+
   // ── Resolve source content + imports ───────────────────────────
   const sourceContent = malloyFiles.get(sourceSelection.filename)!;
 
@@ -265,6 +280,7 @@ export async function ask(options: AskOptions): Promise<AskResult> {
       sessionContext,
     });
     totalUsage = addUsage(totalUsage, feasibility.usage);
+    options.onStage?.({ stage: "feasibility", detail: { feasible: feasibility.feasible } });
 
     if (!feasibility.feasible) {
       // If inherited source can't answer the question, retry with fresh selection
@@ -332,6 +348,7 @@ export async function ask(options: AskOptions): Promise<AskResult> {
   const finalMeta = metadata ? getSourceMetadata(metadata, sourceSelection.sourceName) : null;
 
   // ── STAGE 2: Query generation ─────────────────────────────────
+  options.onStage?.({ stage: "generating" });
   let query = await generateQuery({
     question,
     sourceName: sourceSelection.sourceName,
@@ -393,6 +410,7 @@ export async function ask(options: AskOptions): Promise<AskResult> {
     connectorKind,
   };
 
+  options.onStage?.({ stage: "executing" });
   const firstAttempt = await executeQuery(execOpts);
 
   if (!firstAttempt.ok) {
@@ -433,6 +451,7 @@ export async function ask(options: AskOptions): Promise<AskResult> {
   let verification;
 
   if (execution && !options.noVerify) {
+    options.onStage?.({ stage: "verifying" });
     verification = await verifyResult({
       question,
       malloy: query.malloy,
