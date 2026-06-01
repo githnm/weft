@@ -28,6 +28,9 @@ gcloud auth application-default login
 
 ## 2. Clone and install
 
+<img width="1468" height="824" alt="image" src="https://github.com/user-attachments/assets/e43ab4c6-4714-4d29-a4d1-0cdbae025951" />
+
+
 ```bash
 git clone https://github.com/githnm/weft.git
 cd weft
@@ -66,6 +69,9 @@ pnpm web
 
 You'll see:
 
+<img width="1468" height="827" alt="image" src="https://github.com/user-attachments/assets/e0eb87f3-c2cd-44b6-a792-fa0e0f93c703" />
+
+
 ```
 Weft web API listening on http://127.0.0.1:4000
 Open http://127.0.0.1:4000
@@ -87,11 +93,17 @@ In the app, go to **Connections → Add connection**, choose **BigQuery**, and f
 
 Click **Test connection**. On success it confirms the dataset is reachable. Then **Save connection**.
 
+<img width="1466" height="826" alt="image" src="https://github.com/user-attachments/assets/2ee10353-d5e0-40c8-b9a6-4ddebf93b17e" />
+
+
 > Credentials are stored locally in `.weft/connections.json` (gitignored, owner-only `0600`) and never sent to the browser — the UI only ever sees masked metadata.
 
 ## 7. Introspect the dataset
 
 On the connection card, click **Introspect**. This scans the dataset and builds the **substrate**: it lists tables, reads columns/types/foreign-keys, samples values, and writes a per-table `.malloy` file plus an `inspection.json` under `.weft/substrates/<connection-id>/`.
+
+<img width="1467" height="826" alt="image" src="https://github.com/user-attachments/assets/9f6a2b1f-708a-4e03-8b8d-985731587244" />
+
 
 It runs as a background job with live progress (`listing tables → reading columns → reading tables (N of M) → writing substrate`). For `thelook_ecommerce` it's quick — seven tables: `distribution_centers`, `events`, `inventory_items`, `order_items`, `orders`, `products`, `users`. Wait until the connection shows **ready**.
 
@@ -106,11 +118,20 @@ Go to **Models → Design new model**. The wizard has six steps:
 5. **Definitions** — optionally add business definitions now (you can also add them later).
 6. **Build** — Weft generates the model, compiles every measure against BigQuery, repairs what it can, and saves it.
 
+<img width="1466" height="822" alt="image" src="https://github.com/user-attachments/assets/257dabaf-7051-45a9-89ef-2e04bb367c42" />
+
+<img width="1465" height="822" alt="image" src="https://github.com/user-attachments/assets/a2c7d7f0-2406-4e89-a881-a4675984e5cf" />
+
+
+
 The result is a named semantic model saved under `.weft/models/<model-name>/` (a `model.malloy` plus its manifest). The model page shows its sources, measures, dimensions, a diagram, and the raw Malloy.
 
 ## 9. Connect to Claude Desktop via MCP
 
 On the model page, open the **Connect via MCP** panel. It generates the exact config block with the correct absolute path to *this* clone's server already filled in. Click **Copy**. The block looks like:
+
+<img width="1467" height="824" alt="image" src="https://github.com/user-attachments/assets/55064f67-d90c-403c-86b0-d89717a28fa4" />
+
 
 ```json
 "weft": {
@@ -188,11 +209,21 @@ The result (one row per month):
 | 2023-02     | 398,210.25 |
 | …           | …          |
 
+<img width="1469" height="826" alt="image" src="https://github.com/user-attachments/assets/ee8dccae-e839-4b04-b078-9500e9b18eb5" />
+
+
 Followed by `Bytes scanned: 6.2 MB · BQ cost: $0.00003` and a **Verification** section ("returned one row per month, no null grouping keys, revenue positive"). Exact numbers depend on the dataset snapshot and how your model was built.
 
 **"Show the top 10 products by revenue."** — joins `products` to `order_items`, sums `sale_price`, orders descending, limit 10.
 
 **Define a term, then use it.** Definitions bake into the model so later questions reuse them:
+
+<img width="1468" height="823" alt="image" src="https://github.com/user-attachments/assets/73fb7a15-bc2e-4d7b-8f20-8ef1a1d8c1cd" />
+
+<img width="1468" height="823" alt="image" src="https://github.com/user-attachments/assets/432b6d8a-3260-4f28-8f6b-05cb3300f213" />
+
+
+
 
 > "Define a completed order as an order whose status is 'Complete'."
 
@@ -227,6 +258,10 @@ Every question, definition, and correction is recorded as a decision trace. Open
 - **Most used** — which measures people actually query, ranked by use.
 - **Definitions** — the curated meaning layer (e.g. `completed order` and its aliases).
 - **Gaps** — concepts people asked about that the model can't answer yet, surfaced as the top thing to add.
+
+<img width="1469" height="822" alt="image" src="https://github.com/user-attachments/assets/66170a8d-f96b-49ed-ada8-eb440a227fa9" />
+
+
 
 This is why the model improves as it's used: the questions reveal what's missing, the definitions accumulate the org's shared vocabulary, and the gaps tell you exactly what to model next. The context graph is the organization's analytical memory — not just a query log.
 
