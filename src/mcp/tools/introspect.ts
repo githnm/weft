@@ -18,11 +18,20 @@ export function register(server: McpServer): void {
     "introspect_warehouse",
     "Introspect a warehouse dataset (BigQuery or Postgres). Generates Malloy models, captures metadata, and writes to the substrate directory. WARNING: Introspection is a heavy one-time operation best run via the CLI (`pnpm cli introspect`). Do NOT call this tool if a substrate already exists — first call list_substrate_tables to check. Only introspect if no substrate is found AND the user explicitly confirms they want to run a multi-minute operation. In an IDE, this tool has a 90-second timeout and will abort if it takes longer; use the CLI for large datasets.",
     {
-      connector: z.enum(["bigquery", "postgres"]).default("bigquery").describe("Connector type: 'bigquery' or 'postgres'"),
+      connector: z.enum(["bigquery", "postgres", "duckdb", "mysql", "snowflake"]).default("bigquery").describe("Connector type"),
       project: z.string().optional().describe("GCP project that owns the dataset (BigQuery only, e.g. 'bigquery-public-data')"),
       dataset: z.string().optional().describe("BigQuery dataset name (BigQuery only, e.g. 'austin_bikeshare')"),
-      connection_string: z.string().optional().describe("Postgres connection string (Postgres only, e.g. 'postgres://user:pass@host:5432/db?sslmode=require'). Falls back to $POSTGRES_URL."),
+      connection_string: z.string().optional().describe("Postgres/MySQL connection string. Postgres falls back to $POSTGRES_URL, MySQL to $MYSQL_URL."),
       pg_schema: z.string().default("public").describe("Postgres schema to introspect (Postgres only, default: 'public')"),
+      file_path: z.string().optional().describe("DuckDB file path (DuckDB only) — a .duckdb file or a Parquet/CSV. Falls back to $DUCKDB_DATABASE. No server needed."),
+      sf_account: z.string().optional().describe("Snowflake account identifier (org-account, e.g. 'myorg-myaccount')"),
+      sf_user: z.string().optional().describe("Snowflake username"),
+      sf_warehouse: z.string().optional().describe("Snowflake warehouse"),
+      sf_database: z.string().optional().describe("Snowflake database"),
+      sf_schema: z.string().default("PUBLIC").describe("Snowflake schema (default: PUBLIC)"),
+      sf_role: z.string().optional().describe("Snowflake role (optional)"),
+      sf_password: z.string().optional().describe("Snowflake password (or use sf_key for key-pair auth)"),
+      sf_key: z.string().optional().describe("Snowflake private key file path (key-pair auth)"),
       models_dir: z.string().optional().describe("Output directory for models (default: ./substrate or $DEFAULT_SUBSTRATE_DIR). Previously called 'models', now defaults to substrate for the two-layer architecture."),
       billing_project: z.string().optional().describe("GCP billing project (BigQuery only, default: $BQ_PROJECT_ID)"),
       location: z.string().default("US").describe("BigQuery dataset region (e.g. US, EU, asia-northeast1)"),
@@ -34,7 +43,39 @@ export function register(server: McpServer): void {
         const outputDir = args.models_dir || resolveSubstrateDir();
 
         let connector;
-        if (args.connector === "postgres") {
+        if (args.connector === "duckdb") {
+          const filePath = args.file_path ?? process.env.DUCKDB_DATABASE;
+          if (!filePath) {
+            throw new McpError(
+              ErrorCode.InvalidParams,
+              "file_path is required for the DuckDB connector (a .duckdb file or a Parquet/CSV). Or set DUCKDB_DATABASE.",
+            );
+          }
+          connector = createConnector({ kind: "duckdb", filePath });
+        } else if (args.connector === "mysql") {
+          const connectionString = args.connection_string ?? process.env.MYSQL_URL;
+          if (!connectionString) {
+            throw new McpError(ErrorCode.InvalidParams, "connection_string is required for MySQL (mysql://…). Or set MYSQL_URL.");
+          }
+          connector = createConnector({ kind: "mysql", connectionString });
+        } else if (args.connector === "snowflake") {
+          const account = args.sf_account ?? process.env.SNOWFLAKE_ACCOUNT;
+          const username = args.sf_user ?? process.env.SNOWFLAKE_USER;
+          const warehouse = args.sf_warehouse ?? process.env.SNOWFLAKE_WAREHOUSE;
+          const database = args.sf_database ?? process.env.SNOWFLAKE_DATABASE;
+          if (!account || !username || !warehouse || !database) {
+            throw new McpError(ErrorCode.InvalidParams, "Snowflake requires sf_account, sf_user, sf_warehouse, sf_database (or the SNOWFLAKE_* env vars).");
+          }
+          connector = createConnector({
+            kind: "snowflake",
+            account, username, warehouse, database,
+            schema: args.sf_schema,
+            role: args.sf_role,
+            password: args.sf_password ?? process.env.SNOWFLAKE_PASSWORD,
+            privateKeyPath: args.sf_key ?? process.env.SNOWFLAKE_PRIVATE_KEY_PATH,
+            privateKeyPassphrase: process.env.SNOWFLAKE_PRIVATE_KEY_PASSPHRASE,
+          });
+        } else if (args.connector === "postgres") {
           const connectionString = args.connection_string ?? process.env.POSTGRES_URL;
           if (!connectionString) {
             throw new McpError(

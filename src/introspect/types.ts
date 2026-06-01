@@ -53,6 +53,36 @@ export interface ColumnInspection {
   stats_source?: "sampled" | "full";
   /** Reason this column was skipped for enum capture */
   skipped_enum_reason?: string;
+  /**
+   * For json/jsonb (PG) and JSON (BQ) columns: keys discovered by sampling.
+   * Top-level keys plus one level of object nesting (e.g. "geo.country").
+   * Arrays and deeper nesting are detected and recorded but NOT expanded.
+   * Sorted by frequency (descending). Absent for non-JSON columns.
+   */
+  json_keys?: JsonKeyInfo[];
+  /** Number of sampled (non-null) JSON documents the keys were inferred from */
+  json_sampled_rows?: number;
+}
+
+/**
+ * One key discovered inside a JSON/JSONB column by sampling.
+ *
+ * `path` is dotted (e.g. "browser" or "geo.country"). `frequency` is the
+ * fraction (0..1) of sampled non-null JSON documents containing the key.
+ * `kind` records whether the key is a directly-extractable scalar, an
+ * object we expanded one level (its scalar leaves appear as their own
+ * dotted entries), an array (not expanded — needs unnest), or a value too
+ * deeply nested to expand. Only scalar keys at/above the frequency threshold
+ * are proposed as dimensions.
+ */
+export interface JsonKeyInfo {
+  path: string;
+  frequency: number;
+  kind: "scalar" | "nested-object" | "array" | "deep";
+  /** Dominant scalar value type (scalar keys only); drives extraction casts. */
+  value_type?: "string" | "int" | "float" | "boolean" | "timestamp";
+  /** True if the key's values had mixed scalar types (extraction defaults to string). */
+  mixed_types?: boolean;
 }
 
 export interface SkippedTable {

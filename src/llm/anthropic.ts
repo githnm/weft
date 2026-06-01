@@ -88,6 +88,36 @@ export async function chat(options: {
   };
 }
 
+// ── Tool-use (agent) turn ─────────────────────────────────────────
+
+export type AnthropicMessageParam = Anthropic.MessageParam;
+export type AnthropicTool = Anthropic.Tool;
+export type AnthropicMessage = Anthropic.Message;
+
+/**
+ * One tool-use turn: send the full conversation + tool definitions and return
+ * the raw assistant Message (content blocks + stop_reason + usage). Parallel
+ * tool use is DISABLED so each assistant turn has at most one tool_use — this
+ * keeps the confirm-gate simple (we can pause cleanly on a single write tool).
+ */
+export async function createToolMessage(opts: {
+  system: string;
+  messages: Anthropic.MessageParam[];
+  tools: Anthropic.Tool[];
+  maxTokens?: number;
+}): Promise<Anthropic.Message> {
+  const client = getClient();
+  const model = getModel();
+  return client.messages.create({
+    model,
+    max_tokens: opts.maxTokens ?? 2048,
+    system: opts.system,
+    messages: opts.messages,
+    tools: opts.tools,
+    tool_choice: { type: "auto", disable_parallel_tool_use: true },
+  });
+}
+
 /**
  * Strip markdown code fences the model sometimes wraps JSON in.
  */

@@ -1,20 +1,16 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
-  forceCenter,
-  forceCollide,
-  forceLink,
-  forceManyBody,
-  forceSimulation,
-  type SimulationNodeDatum,
-} from "d3-force";
-import {
   ChevronDown,
+  CircleHelp,
   FlaskConical,
   GitBranch,
+  Hash,
+  LayoutGrid,
   Link2,
   List,
   Loader2,
-  Network,
+  Sparkles,
+  Tag,
   X,
 } from "lucide-react";
 
@@ -28,9 +24,14 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { MalloyBlock } from "@/components/malloy-block";
 import { VerificationCallout } from "@/components/verification-callout";
 import {
+  fetchContextGraph,
   fetchModels,
   fetchTraces,
   runWhatIf,
+  type EntityGraph,
+  type EntityKind,
+  type GraphChange,
+  type GraphEntity,
   type ModelInfo,
   type Trace,
   type WhatIfReport,
@@ -82,9 +83,11 @@ export function ContextScreen() {
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [model, setModel] = useState<string>("");
   const [traces, setTraces] = useState<Trace[]>([]);
+  const [graph, setGraph] = useState<EntityGraph | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [view, setView] = useState<"list" | "graph">("list");
+  // Default to the entity-centric MAP; the raw timeline is the alternate view.
+  const [view, setView] = useState<"map" | "timeline">("map");
   const [selected, setSelected] = useState<Trace | null>(null);
 
   useEffect(() => {
@@ -104,11 +107,22 @@ export function ContextScreen() {
     setLoading(true);
     setError(null);
     setSelected(null);
-    fetchTraces(model)
-      .then(setTraces)
+    // Traces power the timeline + the detail drawer; the graph is the same
+    // traces reorganized around entities for the map.
+    Promise.all([fetchTraces(model), fetchContextGraph(model)])
+      .then(([t, g]) => {
+        setTraces(t);
+        setGraph(g);
+      })
       .catch((e) => setError(e instanceof Error ? e.message : String(e)))
       .finally(() => setLoading(false));
   }, [model]);
+
+  // Open the detail drawer for a trace id (questions / changes / gaps are traces).
+  const openTrace = (id: string) => {
+    const t = traces.find((x) => x.id === id);
+    if (t) setSelected(t);
+  };
 
   // Newest first for the timeline / detail lookups.
   const ordered = useMemo(
@@ -120,10 +134,10 @@ export function ContextScreen() {
     <div className="mx-auto flex max-w-3xl flex-col gap-6 px-8 py-8">
       <div className="flex items-center justify-between">
         <div className="flex flex-col gap-1">
-          <h1 className="text-base font-medium tracking-tight">Context</h1>
+          <h1 className="text-lg font-normal tracking-tight">Context</h1>
           <p className="text-sm text-muted-foreground">
-            The append-only trace of every decision — asks, corrections, refusals — with reasoning,
-            outcome, and links.
+            How this model is used and how its meaning evolved — questions clustered around the
+            measures and definitions they rely on, plus the gaps no one could answer.
           </p>
         </div>
         <ModelSelect models={models} value={model} onChange={setModel} />
@@ -133,17 +147,17 @@ export function ContextScreen() {
 
       <Separator />
 
-      {/* History header + view toggle */}
+      {/* View toggle — entity map (default) or raw timeline */}
       <div className="flex items-center justify-between">
         <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-          Decision history{traces.length > 0 ? ` · ${traces.length}` : ""}
+          {view === "map" ? "Model map" : `Decision history${traces.length > 0 ? ` · ${traces.length}` : ""}`}
         </span>
         <div className="flex items-center gap-1 rounded-md border border-border p-0.5">
-          <ToggleButton active={view === "list"} onClick={() => setView("list")}>
-            <List className="size-3.5" /> List
+          <ToggleButton active={view === "map"} onClick={() => setView("map")}>
+            <LayoutGrid className="size-3.5" /> Map
           </ToggleButton>
-          <ToggleButton active={view === "graph"} onClick={() => setView("graph")}>
-            <Network className="size-3.5" /> Graph
+          <ToggleButton active={view === "timeline"} onClick={() => setView("timeline")}>
+            <List className="size-3.5" /> Timeline
           </ToggleButton>
         </div>
       </div>
@@ -170,10 +184,10 @@ export function ContextScreen() {
 
       {!loading && !error && traces.length > 0 && (
         <>
-          {view === "list" ? (
-            <Timeline traces={ordered} onSelect={setSelected} />
+          {view === "map" && graph ? (
+            <EntityMap graph={graph} onSelectTrace={openTrace} />
           ) : (
-            <GraphView traces={ordered} onSelect={setSelected} />
+            <Timeline traces={ordered} onSelect={setSelected} />
           )}
         </>
       )}
@@ -229,116 +243,243 @@ function Timeline({ traces, onSelect }: { traces: Trace[]; onSelect: (t: Trace) 
   );
 }
 
-// ── Graph (d3-force, static layout, SVG) ─────────────────────────
 
-interface GNode extends SimulationNodeDatum {
-  id: string;
-  type: string;
-  label: string;
+// ── Entity-centric map (the default view) ───────────────────────
+
+const KIND_LABEL: Record<EntityKind, string> = {
+  measure: "Measure",
+  dimension: "Dimension",
+  definition: "Definition",
+  view: "View",
+};
+
+function KindIcon({ kind }: { kind: EntityKind }) {
+  const cls = "size-3.5 text-tertiary";
+  if (kind === "definition") return <Sparkles className={cls} strokeWidth={1.75} />;
+  if (kind === "dimension") return <Tag className={cls} strokeWidth={1.75} />;
+  if (kind === "view") return <LayoutGrid className={cls} strokeWidth={1.75} />;
+  return <Hash className={cls} strokeWidth={1.75} />;
 }
-interface GLink {
-  source: string | GNode;
-  target: string | GNode;
+
+function statusDotClass(s: string): string {
+  if (s === "verified" || s === "accepted") return "bg-success";
+  if (s === "reversed" || s === "rejected" || s === "failed") return "bg-destructive";
+  return "bg-border-strong";
 }
 
-function GraphView({ traces, onSelect }: { traces: Trace[]; onSelect: (t: Trace) => void }) {
-  const W = 720;
-  const H = 440;
+function EntityMap({ graph, onSelectTrace }: { graph: EntityGraph; onSelectTrace: (id: string) => void }) {
+  const qById = useMemo(() => new Map(graph.questions.map((q) => [q.id, q])), [graph]);
+  const cById = useMemo(() => new Map(graph.changes.map((c) => [c.id, c])), [graph]);
+  const gById = useMemo(() => new Map(graph.gaps.map((g) => [g.id, g])), [graph]);
 
-  const { nodes, links } = useMemo(() => {
-    const idset = new Set(traces.map((t) => t.id));
-    const nodes: GNode[] = traces.map((t) => ({ id: t.id, type: t.decision_type, label: t.observation }));
-    const links: GLink[] = [];
-    for (const t of traces) {
-      for (const to of t.links ?? []) {
-        if (idset.has(to)) links.push({ source: t.id, target: to });
-      }
-    }
-    const sim = forceSimulation(nodes)
-      .force("charge", forceManyBody().strength(-180))
-      .force("link", forceLink<GNode, GLink>(links).id((d) => d.id).distance(72))
-      .force("center", forceCenter(W / 2, H / 2))
-      .force("collide", forceCollide(22))
-      .stop();
-    for (let i = 0; i < 300; i++) sim.tick();
-    return { nodes, links };
-  }, [traces]);
-
-  const xs = nodes.map((n) => n.x ?? 0);
-  const ys = nodes.map((n) => n.y ?? 0);
-  const pad = 40;
-  const minX = Math.min(W, ...xs) - pad;
-  const maxX = Math.max(0, ...xs) + pad;
-  const minY = Math.min(H, ...ys) - pad;
-  const maxY = Math.max(0, ...ys) + pad;
-  const showLabels = nodes.length <= 30;
-  const byId = (id: string) => traces.find((t) => t.id === id);
+  const active = graph.entities.filter((e) => e.usageCount > 0 || e.changeIds.length > 0);
+  const dormant = graph.entities.filter((e) => e.usageCount === 0 && e.changeIds.length === 0);
+  const otherQuestions = graph.unclusteredQuestionIds
+    .map((id) => qById.get(id))
+    .filter(Boolean) as EntityGraph["questions"];
 
   return (
-    <div className="overflow-hidden rounded-lg border border-border bg-card">
-      <svg
-        width="100%"
-        height={460}
-        viewBox={`${minX} ${minY} ${maxX - minX} ${maxY - minY}`}
-        preserveAspectRatio="xMidYMid meet"
-      >
-        <defs>
-          <marker
-            id="ctx-arrow"
-            viewBox="0 0 10 10"
-            refX="17"
-            refY="5"
-            markerWidth="5"
-            markerHeight="5"
-            orient="auto-start-reverse"
-          >
-            <path d="M0,0 L10,5 L0,10 z" fill="hsl(0 0% 78%)" />
-          </marker>
-        </defs>
-        {links.map((l, i) => {
-          const s = l.source as GNode;
-          const t = l.target as GNode;
-          return (
-            <line
-              key={i}
-              x1={s.x}
-              y1={s.y}
-              x2={t.x}
-              y2={t.y}
-              stroke="hsl(0 0% 82%)"
-              strokeWidth={1}
-              markerEnd="url(#ctx-arrow)"
-            />
-          );
-        })}
-        {nodes.map((n) => (
-          <g
-            key={n.id}
-            transform={`translate(${n.x ?? 0},${n.y ?? 0})`}
-            className="cursor-pointer"
-            onClick={() => {
-              const t = byId(n.id);
-              if (t) onSelect(t);
-            }}
-          >
-            <circle r={7} fill={typeColor(n.type)} stroke="white" strokeWidth={1.5} />
-            {showLabels && (
-              <text x={11} y={3.5} fontSize={10} fill="hsl(0 0% 38%)">
-                {truncate(n.label, 22)}
-              </text>
-            )}
-          </g>
-        ))}
-      </svg>
-      <div className="flex flex-wrap gap-x-4 gap-y-1.5 border-t border-border px-3 py-2">
-        {Object.keys(TYPE_LABELS).map((t) => (
-          <span key={t} className="flex items-center gap-1.5 text-xs text-muted-foreground">
-            <span className="size-2 rounded-full" style={{ backgroundColor: typeColor(t) }} />
-            {typeLabel(t)}
-          </span>
-        ))}
+    <div className="flex flex-col gap-4">
+      {/* Summary — what the owner gets at a glance */}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+        <span><span className="font-medium text-foreground">{graph.stats.questions}</span> questions</span>
+        <span className="text-border-strong">·</span>
+        <span><span className="font-medium text-foreground">{graph.entities.length}</span> measures &amp; definitions</span>
+        <span className="text-border-strong">·</span>
+        <span><span className="font-medium text-foreground">{graph.stats.changes}</span> changes</span>
+        <span className="text-border-strong">·</span>
+        <span><span className="font-medium text-foreground">{graph.gaps.length}</span> gaps</span>
       </div>
+
+      {/* Entity clusters — questions grouped around what they used, most-used first */}
+      {active.length > 0 ? (
+        <div className="grid grid-cols-1 items-start gap-3 md:grid-cols-2">
+          {active.map((e) => (
+            <EntityCluster key={e.id} entity={e} qById={qById} cById={cById} onSelectTrace={onSelectTrace} />
+          ))}
+        </div>
+      ) : (
+        <p className="rounded-lg border border-dashed border-border px-4 py-6 text-center text-sm text-muted-foreground">
+          No questions have referenced a measure or definition yet.
+        </p>
+      )}
+
+      {/* Gaps — clustered by the missing concept = what to add */}
+      {graph.gaps.length > 0 && <GapsCluster graph={graph} gById={gById} onSelectTrace={onSelectTrace} />}
+
+      {/* Questions that referenced no known entity */}
+      {otherQuestions.length > 0 && (
+        <Card>
+          <CardHeader className="border-b border-border py-2.5">
+            <CardTitle className="text-muted-foreground">
+              Other questions <span className="text-muted-foreground/60">({otherQuestions.length})</span>
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-0 p-0">
+            {otherQuestions.map((q) => (
+              <QuestionRow key={q.id} q={q} onSelect={onSelectTrace} />
+            ))}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Building blocks no one has used yet */}
+      {dormant.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1.5 rounded-lg border border-border bg-muted/40 px-3.5 py-3">
+          <span className="text-xs text-muted-foreground">Not used yet:</span>
+          {dormant.map((e) => (
+            <span
+              key={e.id}
+              className="inline-flex items-center gap-1 rounded border border-border bg-card px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground"
+            >
+              <KindIcon kind={e.kind} />
+              {e.name}
+            </span>
+          ))}
+        </div>
+      )}
     </div>
+  );
+}
+
+function QuestionRow({
+  q,
+  onSelect,
+}: {
+  q: { id: string; text: string; status: string; timestamp: string };
+  onSelect: (id: string) => void;
+}) {
+  return (
+    <button
+      onClick={() => onSelect(q.id)}
+      className="flex items-start gap-2 border-b border-border-subtle px-4 py-2 text-left transition-colors last:border-0 hover:bg-muted/50"
+    >
+      <span className={cn("mt-1.5 size-1.5 shrink-0 rounded-full", statusDotClass(q.status))} aria-hidden />
+      <span className="min-w-0 flex-1 truncate text-sm text-foreground">{q.text}</span>
+      <span className="shrink-0 pl-2 text-xs text-muted-foreground">{relTime(q.timestamp)}</span>
+    </button>
+  );
+}
+
+function EntityCluster({
+  entity,
+  qById,
+  cById,
+  onSelectTrace,
+}: {
+  entity: GraphEntity;
+  qById: Map<string, EntityGraph["questions"][number]>;
+  cById: Map<string, GraphChange>;
+  onSelectTrace: (id: string) => void;
+}) {
+  const questions = entity.questionIds.map((id) => qById.get(id)).filter(Boolean) as EntityGraph["questions"];
+  const changes = entity.changeIds.map((id) => cById.get(id)).filter(Boolean) as GraphChange[];
+
+  return (
+    <Card>
+      <CardHeader className="gap-1.5 border-b border-border py-2.5">
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex min-w-0 items-center gap-2">
+            <KindIcon kind={entity.kind} />
+            <span className="text-[11px] font-semibold uppercase tracking-[0.08em] text-tertiary">
+              {KIND_LABEL[entity.kind]}
+            </span>
+            <span className="truncate font-mono text-sm text-foreground">{entity.name}</span>
+          </div>
+          <Badge variant={entity.usageCount > 0 ? "default" : "outline"}>
+            {entity.usageCount > 0 ? `used by ${entity.usageCount}` : "unused"}
+          </Badge>
+        </div>
+        {entity.expr && <span className="truncate font-mono text-xs text-muted-foreground">{entity.expr}</span>}
+        {entity.aliases.length > 0 && (
+          <span className="flex flex-wrap items-center gap-1.5">
+            <span className="text-xs text-muted-foreground">also called</span>
+            {entity.aliases.map((a) => (
+              <Badge key={a} variant="outline">{a}</Badge>
+            ))}
+          </span>
+        )}
+      </CardHeader>
+      <CardContent className="flex flex-col gap-0 p-0">
+        {/* How its meaning evolved — changes that touched this entity */}
+        {changes.map((c) => (
+          <button
+            key={c.id}
+            onClick={() => onSelectTrace(c.id)}
+            className="flex flex-col gap-0.5 border-b border-border-subtle px-4 py-2 text-left transition-colors hover:bg-muted/50"
+          >
+            <span className="flex items-center gap-1.5 text-xs">
+              <Sparkles className="size-3 shrink-0 text-tertiary" strokeWidth={1.75} />
+              <span className="font-medium text-foreground">{c.label}</span>
+              {c.affectedQuestionIds.length > 0 && (
+                <span className="text-muted-foreground">· affected {c.affectedQuestionIds.length}</span>
+              )}
+            </span>
+            {c.detail && <span className="truncate pl-4 font-mono text-[11px] text-muted-foreground">{c.detail}</span>}
+          </button>
+        ))}
+
+        {/* Questions clustered under this entity */}
+        {questions.length > 0
+          ? questions.map((q) => <QuestionRow key={q.id} q={q} onSelect={onSelectTrace} />)
+          : changes.length === 0 && (
+              <p className="px-4 py-3 text-xs text-muted-foreground">No questions have used this yet.</p>
+            )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function GapsCluster({
+  graph,
+  gById,
+  onSelectTrace,
+}: {
+  graph: EntityGraph;
+  gById: Map<string, EntityGraph["gaps"][number]>;
+  onSelectTrace: (id: string) => void;
+}) {
+  return (
+    <Card>
+      <CardHeader className="gap-1 border-b border-border py-2.5">
+        <CardTitle className="flex items-center gap-2">
+          <CircleHelp className="size-3.5 text-tertiary" strokeWidth={1.75} />
+          Gaps — asked but unanswerable <span className="text-muted-foreground/60">({graph.gaps.length})</span>
+        </CardTitle>
+        <p className="text-xs text-muted-foreground">
+          What people asked that the model couldn’t answer — clustered by the missing concept. These are
+          candidates to add.
+        </p>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-0 p-0">
+        {graph.gapConcepts.map((gc) => (
+          <div key={gc.concept} className="flex flex-col gap-1.5 border-b border-border-subtle px-4 py-2.5 last:border-0">
+            <div className="flex items-center gap-2">
+              <Badge variant="warn">missing: {gc.concept}</Badge>
+              <span className="text-xs text-muted-foreground">
+                {gc.gapIds.length} question{gc.gapIds.length === 1 ? "" : "s"}
+              </span>
+            </div>
+            <div className="flex flex-col">
+              {gc.gapIds.map((id) => {
+                const g = gById.get(id);
+                if (!g) return null;
+                return (
+                  <button
+                    key={id}
+                    onClick={() => onSelectTrace(id)}
+                    className="flex items-start gap-2 rounded-md px-1 py-1 text-left transition-colors hover:bg-muted/50"
+                  >
+                    <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-destructive/60" aria-hidden />
+                    <span className="min-w-0 flex-1 truncate text-sm text-foreground">{g.text}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        ))}
+      </CardContent>
+    </Card>
   );
 }
 
@@ -362,8 +503,8 @@ function TraceDetail({
   return (
     <div className="fixed inset-0 z-40">
       <div className="absolute inset-0 bg-foreground/5" onClick={onClose} />
-      <aside className="absolute right-0 top-0 flex h-full w-[440px] flex-col overflow-y-auto border-l border-border bg-background">
-        <div className="sticky top-0 flex items-center justify-between border-b border-border bg-background px-5 py-3">
+      <aside className="absolute right-0 top-0 flex h-full w-[440px] flex-col overflow-y-auto border-l border-border bg-card">
+        <div className="sticky top-0 flex items-center justify-between border-b border-border bg-card px-5 py-3">
           <div className="flex items-center gap-2">
             <span className="size-2.5 rounded-full" style={{ backgroundColor: typeColor(trace.decision_type) }} />
             <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
@@ -629,7 +770,7 @@ function ToggleButton({
       onClick={onClick}
       className={cn(
         "flex items-center gap-1.5 rounded-[5px] px-2 py-1 text-xs transition-colors",
-        active ? "bg-primary/5 font-medium text-foreground" : "text-muted-foreground hover:text-foreground",
+        active ? "bg-muted font-medium text-foreground" : "text-muted-foreground hover:text-foreground",
       )}
     >
       {children}
@@ -652,7 +793,7 @@ function ModelSelect({
         value={value}
         onChange={(e) => onChange(e.target.value)}
         disabled={models.length === 0}
-        className="h-8 appearance-none rounded-md border border-input bg-background py-0 pl-2.5 pr-7 font-mono text-xs text-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background disabled:opacity-50"
+        className="h-8 appearance-none rounded-md border border-input bg-card py-0 pl-2.5 pr-7 font-mono text-xs text-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background disabled:opacity-50"
       >
         {models.length === 0 && <option value="">no models</option>}
         {models.map((m) => (

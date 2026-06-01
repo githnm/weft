@@ -17,9 +17,9 @@ const STYLES: Record<
   { wrap: string; icon: typeof Info; iconClass: string; titleClass: string }
 > = {
   verified: {
-    wrap: "border-l-2 border-l-primary border-y border-r border-border bg-success-subtle/50",
+    wrap: "border-l-2 border-l-success border-y border-r border-success-border bg-success-subtle/60",
     icon: ShieldCheck,
-    iconClass: "text-primary",
+    iconClass: "text-success",
     titleClass: "text-foreground",
   },
   caveat: {
@@ -40,7 +40,7 @@ export function VerificationCallout({ kind, title, children }: VerificationCallo
   const s = STYLES[kind];
   const Icon = s.icon;
   return (
-    <div className={cn("rounded-md px-3.5 py-3", s.wrap)}>
+    <div className={cn("rounded-lg px-3.5 py-3", s.wrap)}>
       <div className="flex items-start gap-2.5">
         <Icon className={cn("mt-px size-4 shrink-0", s.iconClass)} strokeWidth={1.75} />
         <div className="flex flex-col gap-1">

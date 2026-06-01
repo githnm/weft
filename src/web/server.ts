@@ -33,10 +33,26 @@ import { listModels, showModel } from "../models/registry.js";
 import { parseModelItems } from "../interview/compile.js";
 import { proposeModelPlan } from "../interview/plan.js";
 import { buildModelWithClarification } from "../interview/build.js";
-import type { ResolvedDecision, RelevantTable } from "../interview/types.js";
+import { refineModel, saveRefinement } from "../interview/refine.js";
+import { bakeDefinition } from "../interview/definitions.js";
+import { previewChange, applyChange } from "./model-change.js";
+import { buildEntityGraph } from "./context-graph.js";
+import { runAgentTurn, resumeAgentAfterWrite, type AgentPending } from "./agent.js";
+import type { ResolvedDecision, RelevantTable, RefinementClassification } from "../interview/types.js";
+import type { InspectionResult } from "../introspect/types.js";
 import { readTraces } from "../context/trace.js";
 import { simulateChange } from "../context/simulate.js";
 import { loadSession } from "../session/store.js";
+import {
+  listConnections,
+  addConnection,
+  deleteConnection,
+  getConnection,
+  setActiveConnection,
+} from "../connections/store.js";
+import type { ConnectionRecord, AddInput } from "../connections/store.js";
+import { testConnectionRecord } from "../connections/test.js";
+import { syncActiveConnection } from "../connections/runtime.js";
 import { classifyCorrection } from "../correct/classify.js";
 import { prepareTermUpdate, applyTermUpdate } from "../correct/term-update.js";
 import { prepareModelSuggestion, logModelSuggestion } from "../correct/model-suggest.js";
@@ -77,6 +93,37 @@ function resolveSubstrate(explicit?: string): string {
 
 function hasInspection(dir: string): boolean {
   return fs.existsSync(path.join(dir, "inspection.json"));
+}
+
+/**
+ * The model's sources in scope, with their data fields (columns), read from the
+ * substrate's inspection.json. This is what the editor's left pane shows so the
+ * user can see what's available to reference. Empty on any read failure.
+ */
+async function modelSources(
+  modelDir: string,
+  substrateRel: string,
+  baseTables: string[],
+): Promise<{ name: string; rowCount: number; columns: { name: string; type: string; jsonKeys: number }[] }[]> {
+  try {
+    const substrateDir = path.resolve(modelDir, substrateRel);
+    const raw = await fsp.readFile(path.join(substrateDir, "inspection.json"), "utf-8");
+    const inspection = JSON.parse(raw) as InspectionResult;
+    const want = new Set(baseTables.map((t) => t.toLowerCase()));
+    return inspection.tables
+      .filter((t) => want.has(t.name.toLowerCase()))
+      .map((t) => ({
+        name: t.name,
+        rowCount: t.row_count,
+        columns: t.columns.map((c) => ({
+          name: c.name,
+          type: c.type,
+          jsonKeys: c.json_keys?.length ?? 0,
+        })),
+      }));
+  } catch {
+    return [];
+  }
 }
 
 function substrateNotFoundMessage(dir: string): string {
@@ -160,6 +207,176 @@ async function buildServer() {
     });
   });
 
+  // ── Connections — add/manage DB connections from the UI, stored LOCALLY ──
+  //
+  // Credentials live in a local, gitignored config file and in this server
+  // process only. The browser never stores or receives the secret: list/add
+  // return METADATA ONLY. Test/use go through the existing connector layer.
+
+  type ConnBody = {
+    type?: string;
+    name?: string;
+    // postgres / mysql
+    host?: string;
+    port?: number;
+    database?: string;
+    user?: string;
+    password?: string;
+    sslmode?: string;
+    ssl?: boolean;
+    // bigquery
+    project_id?: string;
+    location?: string;
+    key_file_path?: string;
+    // duckdb
+    file_path?: string;
+    // snowflake
+    account?: string;
+    username?: string;
+    warehouse?: string;
+    schema?: string;
+    role?: string;
+    private_key_path?: string;
+    private_key_passphrase?: string;
+  };
+
+  /** Validate a request body into an AddInput (no persistence). */
+  function parseConnBody(b: ConnBody): { ok: true; input: AddInput } | { ok: false; error: string } {
+    const name = (b.name ?? "").trim();
+    if (!name) return { ok: false, error: "name is required" };
+
+    if (b.type === "postgres" || b.type === "mysql") {
+      const host = (b.host ?? "").trim();
+      const database = (b.database ?? "").trim();
+      const user = (b.user ?? "").trim();
+      const password = b.password ?? "";
+      if (!host) return { ok: false, error: "host is required" };
+      if (!database) return { ok: false, error: "database is required" };
+      if (!user) return { ok: false, error: "user is required" };
+      if (!password) return { ok: false, error: "password is required" };
+      if (b.type === "postgres") {
+        return { ok: true, input: { type: "postgres", name, host, port: Number(b.port) || 5432, database, user, password, sslmode: (b.sslmode ?? "no-verify").trim() || "no-verify" } };
+      }
+      return { ok: true, input: { type: "mysql", name, host, port: Number(b.port) || 3306, database, user, password, ssl: !!b.ssl } };
+    }
+
+    if (b.type === "bigquery") {
+      const project_id = (b.project_id ?? "").trim();
+      if (!project_id) return { ok: false, error: "project_id is required" };
+      return { ok: true, input: { type: "bigquery", name, project_id, location: (b.location ?? "US").trim() || "US", key_file_path: b.key_file_path?.trim() || undefined } };
+    }
+
+    if (b.type === "duckdb") {
+      const file_path = (b.file_path ?? "").trim();
+      if (!file_path) return { ok: false, error: "file_path is required (point at a .duckdb file or a Parquet/CSV)" };
+      return { ok: true, input: { type: "duckdb", name, file_path } };
+    }
+
+    if (b.type === "snowflake") {
+      const account = (b.account ?? "").trim();
+      const username = (b.username ?? "").trim();
+      const warehouse = (b.warehouse ?? "").trim();
+      const database = (b.database ?? "").trim();
+      if (!account) return { ok: false, error: "account is required" };
+      if (!username) return { ok: false, error: "username is required" };
+      if (!warehouse) return { ok: false, error: "warehouse is required" };
+      if (!database) return { ok: false, error: "database is required" };
+      if (!b.password && !b.private_key_path?.trim()) {
+        return { ok: false, error: "provide a password OR a private key path (key-pair auth)" };
+      }
+      return {
+        ok: true,
+        input: {
+          type: "snowflake", name, account, username, warehouse, database,
+          schema: (b.schema ?? "PUBLIC").trim() || "PUBLIC",
+          role: b.role?.trim() || undefined,
+          password: b.password || undefined,
+          private_key_path: b.private_key_path?.trim() || undefined,
+          private_key_passphrase: b.private_key_passphrase || undefined,
+        },
+      };
+    }
+
+    return { ok: false, error: "type must be one of: postgres, mysql, bigquery, duckdb, snowflake" };
+  }
+
+  /** Build a transient (unsaved) ConnectionRecord from an AddInput, for /test. */
+  function candidateRecord(input: AddInput): ConnectionRecord {
+    const base = { id: "_candidate", created_at: "" };
+    switch (input.type) {
+      case "postgres":
+        return { ...base, name: input.name, type: "postgres", host: input.host, port: input.port ?? 5432, database: input.database, user: input.user, password: input.password, sslmode: input.sslmode || "no-verify" };
+      case "mysql":
+        return { ...base, name: input.name, type: "mysql", host: input.host, port: input.port ?? 3306, database: input.database, user: input.user, password: input.password, ssl: input.ssl ?? false };
+      case "bigquery":
+        return { ...base, name: input.name, type: "bigquery", project_id: input.project_id, location: input.location || "US", key_file_path: input.key_file_path };
+      case "duckdb":
+        return { ...base, name: input.name, type: "duckdb", file_path: input.file_path };
+      case "snowflake":
+        return { ...base, name: input.name, type: "snowflake", account: input.account, username: input.username, warehouse: input.warehouse, database: input.database, schema: input.schema || "PUBLIC", role: input.role, password: input.password, private_key_path: input.private_key_path, private_key_passphrase: input.private_key_passphrase };
+    }
+  }
+
+  // GET — metadata ONLY (never the password).
+  app.get("/api/connections", async () => {
+    const { active_id, metas } = await listConnections();
+    return normalizeValue({ activeId: active_id, connections: metas });
+  });
+
+  // POST — add a connection; persists locally, returns metadata only.
+  app.post<{ Body: ConnBody }>("/api/connections", async (req, reply) => {
+    const parsed = parseConnBody(req.body ?? {});
+    if (!parsed.ok) {
+      reply.code(400);
+      return { error: parsed.error };
+    }
+    const meta = await addConnection(parsed.input);
+    await syncActiveConnection(); // make it usable by the rest of the app
+    return normalizeValue(meta);
+  });
+
+  // POST /test — test an UNSAVED candidate (the form's "Test connection").
+  app.post<{ Body: ConnBody }>("/api/connections/test", async (req, reply) => {
+    const parsed = parseConnBody(req.body ?? {});
+    if (!parsed.ok) {
+      reply.code(400);
+      return { error: parsed.error };
+    }
+    return normalizeValue(await testConnectionRecord(candidateRecord(parsed.input)));
+  });
+
+  // POST /:id/test — test a SAVED connection (the card's "Test").
+  app.post<{ Params: { id: string } }>("/api/connections/:id/test", async (req, reply) => {
+    const record = await getConnection(req.params.id);
+    if (!record) {
+      reply.code(404);
+      return { error: "Connection not found." };
+    }
+    return normalizeValue(await testConnectionRecord(record));
+  });
+
+  // POST /:id/activate — make this the active connection for the app.
+  app.post<{ Params: { id: string } }>("/api/connections/:id/activate", async (req, reply) => {
+    const ok = await setActiveConnection(req.params.id);
+    if (!ok) {
+      reply.code(404);
+      return { error: "Connection not found." };
+    }
+    await syncActiveConnection();
+    return normalizeValue({ activated: req.params.id });
+  });
+
+  // DELETE — remove from the local config file.
+  app.delete<{ Params: { id: string } }>("/api/connections/:id", async (req, reply) => {
+    const ok = await deleteConnection(req.params.id);
+    if (!ok) {
+      reply.code(404);
+      return { error: "Connection not found." };
+    }
+    await syncActiveConnection();
+    return normalizeValue({ deleted: req.params.id });
+  });
+
   // List models
   app.get("/api/models", async (_req, reply) => {
     try {
@@ -198,6 +415,7 @@ async function buildServer() {
       const malloy = await fsp.readFile(path.join(detail.dir, "model.malloy"), "utf-8").catch(() => "");
       const items = parseModelItems(malloy);
       const views = [...malloy.matchAll(/^\s*view:\s+(\w+)\s+is\s+\{/gm)].map((m) => m[1]);
+      const sources = await modelSources(detail.dir, detail.manifest.substrate_dir, detail.manifest.base_tables);
       return normalizeValue({
         name: detail.name,
         purpose: detail.purpose,
@@ -207,9 +425,111 @@ async function buildServer() {
         views,
         malloy,
         decisions: detail.manifest.design?.decisions ?? [],
+        // Baked business definitions (concepts + their explicit aliases) — the
+        // meaningful, queryable vocabulary, shown distinctly in the left pane.
+        concepts: (detail.manifest.concepts ?? []).map((c) => ({
+          canonical_name: c.canonical_name,
+          aliases: c.aliases,
+          field: c.field,
+          kind: c.kind,
+          filter: c.filter ?? null,
+        })),
+        // Sources in scope + their fields, so the user sees what's referenceable.
+        sources,
       });
     } catch (err) {
       reply.code(404);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  // Delete a model — HARD delete, local only. Destructive and irreversible, so
+  // the path-safety checks are strict: we only ever remove a directory that is
+  // a DIRECT child of the semantic-models dir (no "..", no separators, no
+  // absolute escape, no symlink traversal) AND is actually a model (has
+  // model.json / model.malloy). Never touches the substrate or anything else.
+  app.delete<{ Params: { name: string } }>("/api/models/:name", async (req, reply) => {
+    const name = req.params.name;
+    try {
+      // Resolve the SAME way GET /api/models/:name does: under the configured
+      // semantic-models dir via resolveModelDir, then absolutize.
+      const baseDir = path.resolve(semanticModelsDir());
+      const resolved = path.resolve(resolveModelDir(baseDir, name));
+
+      // ── Path safety (defense in depth) ──
+      // 1. The raw name must not carry traversal or path separators.
+      if (
+        !name ||
+        name.includes("/") ||
+        name.includes("\\") ||
+        name.split(/[\\/]/).includes("..") ||
+        name === "." ||
+        name === ".." ||
+        path.isAbsolute(name)
+      ) {
+        reply.code(400);
+        return { error: `Refused: invalid model name "${name}".` };
+      }
+
+      // 2. The resolved path must be a DIRECT child of the semantic-models dir
+      //    (exactly one level deep — no nesting, no escape).
+      const rel = path.relative(baseDir, resolved);
+      const isDirectChild =
+        rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel) && !rel.includes(path.sep);
+      if (!isDirectChild) {
+        reply.code(400);
+        return {
+          error: `Refused: "${name}" does not resolve to a model directly inside the semantic-models directory.`,
+        };
+      }
+
+      // 3. No symlink traversal: the REAL path must still be a direct child of
+      //    the real semantic-models dir. (A model dir that is a symlink to
+      //    somewhere outside resolves out and is refused — we never rm it.)
+      let realPath: string;
+      try {
+        realPath = await fsp.realpath(resolved);
+      } catch {
+        reply.code(404);
+        return { error: `Model "${name}" not found.` };
+      }
+      const realBase = await fsp.realpath(baseDir).catch(() => baseDir);
+      const realRel = path.relative(realBase, realPath);
+      if (
+        realRel === "" ||
+        realRel.startsWith("..") ||
+        path.isAbsolute(realRel) ||
+        realRel.includes(path.sep)
+      ) {
+        reply.code(400);
+        return {
+          error: `Refused: "${name}" resolves outside the semantic-models directory (symlink?).`,
+        };
+      }
+
+      // 4. Confirm it's actually a model directory before removing anything, so
+      //    a bad name can't delete an unrelated dir.
+      const stat = await fsp.stat(realPath).catch(() => null);
+      if (!stat?.isDirectory()) {
+        reply.code(404);
+        return { error: `Model "${name}" not found.` };
+      }
+      const isModel =
+        fs.existsSync(path.join(realPath, "model.json")) ||
+        fs.existsSync(path.join(realPath, "model.malloy"));
+      if (!isModel) {
+        reply.code(400);
+        return {
+          error: `Refused: "${name}" is not a model directory (no model.json / model.malloy).`,
+        };
+      }
+
+      // ── Remove exactly this one model directory (model.malloy, manifest,
+      //    metadata, terms/corrections, traces.jsonl). Substrate untouched. ──
+      await fsp.rm(realPath, { recursive: true, force: true });
+      return normalizeValue({ deleted: name });
+    } catch (err) {
+      reply.code(500);
       return { error: err instanceof Error ? err.message : String(err) };
     }
   });
@@ -242,7 +562,7 @@ async function buildServer() {
       const modelsDir = resolveAskDir(modelName);
       const connectorKind = await detectConnectorKind(modelsDir).catch(() => undefined);
       const billingProject = resolveBillingProject();
-      if (connectorKind !== "postgres" && !billingProject) {
+      if (connectorKind === "bigquery" && !billingProject) {
         send("error", {
           error: "billing_project is required for BigQuery models. Set BQ_PROJECT_ID.",
         });
@@ -389,12 +709,34 @@ async function buildServer() {
           }
         }
 
+        // FULL table list — every table in the substrate, flagged proposed/not,
+        // with row+column counts. The UI shows ALL of them (selected + excluded)
+        // so the user can override the AI's recommendation.
+        let allTables: { name: string; rowCount: number; columnCount: number; proposed: boolean; reason: string }[] = [];
+        try {
+          const insp = JSON.parse(await fsp.readFile(path.join(substrateDir, "inspection.json"), "utf-8")) as InspectionResult;
+          const proposedReason = new Map(relevant.map((t) => [t.name.toLowerCase(), t.reason ?? ""]));
+          allTables = insp.tables
+            .map((t) => ({
+              name: t.name,
+              rowCount: t.row_count,
+              columnCount: t.columns.length,
+              proposed: proposedReason.has(t.name.toLowerCase()),
+              reason: proposedReason.get(t.name.toLowerCase()) ?? "",
+            }))
+            // Proposed first, then alphabetical — stable, scannable order.
+            .sort((a, b) => Number(b.proposed) - Number(a.proposed) || a.name.localeCompare(b.name));
+        } catch {
+          /* fall back to relevantTables only if inspection is unreadable */
+        }
+
         return normalizeValue({
           name: req.body?.name ?? "",
           purpose,
           substrateDir,
           relevantTables: relevant,
           excludedCount: excluded,
+          allTables,
           tableSelectionReasoning: plan.table_selection_reasoning,
           decisions: plan.decisions.map((d) => ({
             id: d.id,
@@ -425,6 +767,7 @@ async function buildServer() {
       resolved_decisions?: { decision_id?: string; id?: string; chosen: string }[];
       relevant_tables?: { name: string; reason?: string }[];
       tables?: string[];
+      definitions?: string[];
       substrate_dir?: string;
       semantic_models_dir?: string;
       clarifications?: { question: string; answer: string }[];
@@ -445,7 +788,7 @@ async function buildServer() {
       const semDir = path.resolve(req.body?.semantic_models_dir ?? resolveSemanticModelsDir());
       const connectorKind = await detectConnectorKind(substrateDir).catch(() => undefined);
       const billingProject = resolveBillingProject();
-      if (connectorKind !== "postgres" && !billingProject) {
+      if (connectorKind === "bigquery" && !billingProject) {
         reply.code(400);
         return { error: "billing_project is required for BigQuery substrates. Set BQ_PROJECT_ID." };
       }
@@ -468,6 +811,7 @@ async function buildServer() {
         billingProject,
         decisions,
         relevantTables,
+        definitions: req.body?.definitions ?? [],
         clarifications,
         surfaceQuestions: clarifications.length === 0,
         maxClarifyRounds: 2,
@@ -495,12 +839,333 @@ async function buildServer() {
     }
   });
 
+  // Refine / add-a-definition — bake a plain-English change into model.malloy.
+  // Used by the Models screen ("add definition") and by promoting a correction
+  // to a permanent definition. Thin wrapper over refineModel + saveRefinement.
+  app.post<{ Params: { model: string }; Body: { change?: string; semantic_models_dir?: string } }>(
+    "/api/models/:model/refine",
+    async (req, reply) => {
+      const change = (req.body?.change ?? "").trim();
+      if (!change) {
+        reply.code(400);
+        return { error: "change is required" };
+      }
+      try {
+        const semDir = path.resolve(req.body?.semantic_models_dir ?? resolveSemanticModelsDir());
+        const modelDir = path.resolve(resolveModelDir(semDir, req.params.model));
+        const connectorKind = await detectConnectorKind(modelDir).catch(() => undefined);
+        const billingProject = resolveBillingProject();
+        if (connectorKind === "bigquery" && !billingProject) {
+          reply.code(400);
+          return { error: "billing_project is required for BigQuery models. Set BQ_PROJECT_ID." };
+        }
+
+        const result = await refineModel({
+          modelName: req.params.model,
+          semanticModelsDir: semDir,
+          refinement: change,
+          billingProject,
+        });
+
+        if (!result.success) {
+          return normalizeValue({
+            applied: false,
+            changeType: result.classification?.change_type ?? null,
+            target: result.classification?.target ?? null,
+            reason: result.classification?.reasoning ?? null,
+            error: result.error ?? null,
+            draftMalloy: result.draft_malloy ?? null,
+          });
+        }
+
+        // "Already satisfied" — refine returns success with identical content.
+        const noChange =
+          !!result.new_malloy && !!result.old_malloy && result.new_malloy === result.old_malloy;
+        if (noChange) {
+          return normalizeValue({
+            applied: false,
+            noChange: true,
+            changeType: result.classification.change_type,
+            target: result.classification.target,
+            reason: result.diff_summary ?? result.classification.reasoning,
+          });
+        }
+
+        await saveRefinement({
+          modelName: req.params.model,
+          semanticModelsDir: semDir,
+          newMalloy: result.new_malloy!,
+          refinement: change,
+          classification: result.classification,
+        });
+
+        return normalizeValue({
+          applied: true,
+          changeType: result.classification.change_type,
+          target: result.classification.target,
+          diffSummary: result.diff_summary ?? null,
+          compileWarning: result.compile_warning ?? null,
+          modelMalloy: result.new_malloy ?? null,
+        });
+      } catch (err) {
+        reply.code(500);
+        return { error: err instanceof Error ? err.message : String(err) };
+      }
+    },
+  );
+
+  // Add a definition (concept + explicit aliases) — baked into model.malloy and
+  // recorded in the manifest. Used by the Definitions step, the "Add a
+  // definition" card, and promoting a correction to a permanent definition.
+  app.post<{
+    Params: { model: string };
+    Body: { definition?: string; aliases?: string[]; canonical_name?: string; semantic_models_dir?: string };
+  }>("/api/models/:model/definition", async (req, reply) => {
+    const definition = (req.body?.definition ?? "").trim();
+    if (!definition) {
+      reply.code(400);
+      return { error: "definition is required" };
+    }
+    try {
+      const semDir = path.resolve(req.body?.semantic_models_dir ?? resolveSemanticModelsDir());
+      const modelDir = path.resolve(resolveModelDir(semDir, req.params.model));
+      const connectorKind = await detectConnectorKind(modelDir).catch(() => undefined);
+      const billingProject = resolveBillingProject();
+      if (connectorKind === "bigquery" && !billingProject) {
+        reply.code(400);
+        return { error: "billing_project is required for BigQuery models. Set BQ_PROJECT_ID." };
+      }
+      // Only owner-confirmed aliases reach here; the server never invents any.
+      const aliases = Array.isArray(req.body?.aliases)
+        ? req.body!.aliases.map((a) => String(a).trim()).filter(Boolean)
+        : [];
+
+      const result = await bakeDefinition({
+        modelName: req.params.model,
+        semanticModelsDir: semDir,
+        definition,
+        aliases,
+        canonicalName: req.body?.canonical_name,
+        billingProject,
+      });
+
+      return normalizeValue({
+        applied: result.applied,
+        noChange: !!result.noChange,
+        concept: result.concept ?? null,
+        changeType: result.changeType ?? null,
+        target: result.target ?? null,
+        diffSummary: result.diffSummary ?? null,
+        compileWarning: result.compileWarning ?? null,
+        modelMalloy: result.modelMalloy ?? null,
+        reason: result.reason ?? null,
+        error: result.error ?? null,
+      });
+    } catch (err) {
+      reply.code(500);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  // ── One conversational surface: propose → confirm → apply ────────
+  //
+  // The editor's right pane sends ONE plain-language string. The system ROUTES
+  // it (define / add-measure / refine / correct) via the existing refine
+  // classifier — the user never picks a function. `propose` previews the change
+  // (the proposed Malloy + structured diff, grounded against the schema) WITHOUT
+  // writing. `apply` commits exactly what was previewed (no second LLM round),
+  // baking it into model.malloy via saveRefinement and recording the concept +
+  // aliases when it's a definition. Everything goes through the build contract
+  // (refineModel compile-checks; a failure is reported, the model untouched).
+
+  app.post<{ Params: { model: string }; Body: { text?: string } }>(
+    "/api/models/:model/propose",
+    async (req, reply) => {
+      const text = (req.body?.text ?? "").trim();
+      if (!text) {
+        reply.code(400);
+        return { error: "text is required" };
+      }
+      try {
+        const semDir = semanticModelsDir();
+        const modelDir = path.resolve(resolveModelDir(semDir, req.params.model));
+        const connectorKind = await detectConnectorKind(modelDir).catch(() => undefined);
+        const billingProject = resolveBillingProject();
+        if (connectorKind === "bigquery" && !billingProject) {
+          reply.code(400);
+          return { error: "billing_project is required for BigQuery models. Set BQ_PROJECT_ID." };
+        }
+        const preview = await previewChange({ modelName: req.params.model, semanticModelsDir: semDir, billingProject, text });
+        return normalizeValue(preview);
+      } catch (err) {
+        reply.code(500);
+        return { error: err instanceof Error ? err.message : String(err) };
+      }
+    },
+  );
+
+  app.post<{
+    Params: { model: string };
+    Body: {
+      text?: string;
+      new_malloy?: string;
+      classification?: RefinementClassification;
+      is_definition?: boolean;
+      canonical_name?: string;
+      aliases?: string[];
+    };
+  }>("/api/models/:model/apply", async (req, reply) => {
+    const text = (req.body?.text ?? "").trim();
+    const newMalloy = req.body?.new_malloy;
+    const classification = req.body?.classification;
+    if (!text || !newMalloy || !classification) {
+      reply.code(400);
+      return { error: "text, new_malloy and classification are required" };
+    }
+    try {
+      const semDir = semanticModelsDir();
+      const result = await applyChange({
+        modelName: req.params.model,
+        semanticModelsDir: semDir,
+        text,
+        newMalloy,
+        classification,
+        isDefinition: req.body?.is_definition,
+        canonicalName: req.body?.canonical_name,
+        aliases: req.body?.aliases,
+      });
+      return normalizeValue({ applied: true, concept: result.concept });
+    } catch (err) {
+      reply.code(500);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  // ── Conversational model-building agent ──────────────────────────
+  //
+  // A tool-using LLM with the engine's tools + the honesty contract: READ
+  // tools run freely; the WRITE tool PAUSES the loop and returns a confirmable
+  // proposal (`pending`) — the model is NOT mutated until the user confirms via
+  // /agent/confirm. Conversation history is opaque + held client-side (echoed
+  // back each turn), keeping the server stateless.
+
+  async function agentBillingGuard(model: string, reply: import("fastify").FastifyReply): Promise<string | undefined | null> {
+    const modelDir = path.resolve(resolveModelDir(semanticModelsDir(), model));
+    const connectorKind = await detectConnectorKind(modelDir).catch(() => undefined);
+    const billingProject = resolveBillingProject();
+    if (connectorKind === "bigquery" && !billingProject) {
+      reply.code(400);
+      return null; // signal: blocked
+    }
+    return billingProject;
+  }
+
+  app.post<{ Params: { model: string }; Body: { messages?: unknown[]; userText?: string } }>(
+    "/api/models/:model/agent",
+    async (req, reply) => {
+      const userText = (req.body?.userText ?? "").trim();
+      if (!userText) {
+        reply.code(400);
+        return { error: "userText is required" };
+      }
+      const billingProject = await agentBillingGuard(req.params.model, reply);
+      if (billingProject === null) return { error: "billing_project is required for BigQuery models. Set BQ_PROJECT_ID." };
+      try {
+        const result = await runAgentTurn({
+          modelName: req.params.model,
+          semanticModelsDir: semanticModelsDir(),
+          billingProject: billingProject ?? undefined,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          messages: (req.body?.messages ?? []) as any,
+          userText,
+        });
+        return normalizeValue({
+          messages: result.messages,
+          events: result.events,
+          pending: result.pending,
+        });
+      } catch (err) {
+        reply.code(500);
+        return { error: err instanceof Error ? err.message : String(err) };
+      }
+    },
+  );
+
+  app.post<{
+    Params: { model: string };
+    Body: {
+      messages?: unknown[];
+      toolUseId?: string;
+      decision?: "confirm" | "reject";
+      apply?: AgentPending; // the previewed proposal, echoed back on confirm
+    };
+  }>("/api/models/:model/agent/confirm", async (req, reply) => {
+    const toolUseId = req.body?.toolUseId;
+    const decision = req.body?.decision;
+    if (!toolUseId || (decision !== "confirm" && decision !== "reject")) {
+      reply.code(400);
+      return { error: "toolUseId and decision ('confirm' | 'reject') are required" };
+    }
+    if (decision === "confirm" && !req.body?.apply) {
+      reply.code(400);
+      return { error: "apply payload is required to confirm" };
+    }
+    const billingProject = await agentBillingGuard(req.params.model, reply);
+    if (billingProject === null) return { error: "billing_project is required for BigQuery models. Set BQ_PROJECT_ID." };
+    try {
+      const p = req.body?.apply;
+      const result = await resumeAgentAfterWrite({
+        modelName: req.params.model,
+        semanticModelsDir: semanticModelsDir(),
+        billingProject: billingProject ?? undefined,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        messages: (req.body?.messages ?? []) as any,
+        toolUseId,
+        decision,
+        apply:
+          decision === "confirm" && p
+            ? {
+                description: p.description,
+                newMalloy: p.newMalloy,
+                classification: p.classification,
+                isDefinition: p.isDefinition,
+                canonicalName: p.canonicalName ?? undefined,
+                aliases: p.aliases,
+              }
+            : undefined,
+      });
+      return normalizeValue({
+        messages: result.messages,
+        events: result.events,
+        pending: result.pending,
+        applied: result.applied ?? false,
+      });
+    } catch (err) {
+      reply.code(500);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
   // Context — decision traces for a model (the append-only event clock).
   app.get<{ Params: { model: string } }>("/api/context/:model/traces", async (req, reply) => {
     try {
       const modelDir = path.resolve(resolveModelDir(semanticModelsDir(), req.params.model));
       const traces = await readTraces(modelDir); // [] if none yet
       return normalizeValue(traces);
+    } catch (err) {
+      reply.code(500);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  // Context — ENTITY-CENTRIC graph: the same traces reorganized around the
+  // measures/definitions/questions/gaps the owner reasons about (which measures
+  // are most used, how a definition evolved + what it touched, where the gaps
+  // are). Pure aggregation over the traces — no new capture.
+  app.get<{ Params: { model: string } }>("/api/context/:model/graph", async (req, reply) => {
+    try {
+      const graph = await buildEntityGraph({ semanticModelsDir: semanticModelsDir(), modelName: req.params.model });
+      return normalizeValue(graph);
     } catch (err) {
       reply.code(500);
       return { error: err instanceof Error ? err.message : String(err) };
@@ -523,7 +1188,7 @@ async function buildServer() {
         const modelDir = path.resolve(resolveModelDir(semDir, req.params.model));
         const connectorKind = await detectConnectorKind(modelDir).catch(() => undefined);
         const billingProject = resolveBillingProject();
-        if (connectorKind !== "postgres" && !billingProject) {
+        if (connectorKind === "bigquery" && !billingProject) {
           reply.code(400);
           return { error: "billing_project is required for BigQuery models. Set BQ_PROJECT_ID." };
         }
@@ -568,7 +1233,11 @@ async function buildServer() {
   return app;
 }
 
-buildServer()
+// Overlay the active saved connection onto the environment at startup, so the
+// whole engine can use it (env vars remain the fallback when none is saved).
+syncActiveConnection()
+  .catch(() => {})
+  .then(buildServer)
   .then((app) => app.listen({ port: PORT, host: "127.0.0.1" }))
   .then((address) => {
     // eslint-disable-next-line no-console

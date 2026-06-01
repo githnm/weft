@@ -13,6 +13,7 @@ import type {
   SkippedColumn,
   IntrospectOptions,
 } from "./types.js";
+import { inferJsonKeys } from "./json-keys.js";
 
 // ── Table filtering ──────────────────────────────────────────
 
@@ -52,6 +53,11 @@ const MAX_FREQUENCY_QUERIES = 30;
 /** Row count above which we use sampling for stats queries */
 const SAMPLE_THRESHOLD = 10_000_000;
 
+/** Rows sampled from each JSON/JSONB column to discover its common keys */
+const JSON_SAMPLE_ROWS = 500;
+/** Only propose JSON keys present in at least this fraction of sampled docs */
+const JSON_KEY_FREQUENCY_THRESHOLD = 0.05;
+
 /** Skip enum capture if the longest captured value exceeds this */
 const FREE_TEXT_MAX_LENGTH = 60;
 /** Skip enum capture if the 75th-percentile value length exceeds this */
@@ -86,6 +92,28 @@ function extractSampleValues(rows: Record<string, unknown>[], columnName: string
   return values;
 }
 
+/** Capture up to 3 JSON documents as compact strings for display. */
+function extractJsonSampleValues(rows: Record<string, unknown>[], columnName: string): unknown[] {
+  const values: unknown[] = [];
+  for (const row of rows) {
+    if (values.length >= 3) break;
+    const val = row[columnName];
+    if (val == null) continue;
+    let str: string;
+    if (typeof val === "string") {
+      str = val;
+    } else {
+      try {
+        str = JSON.stringify(val);
+      } catch {
+        str = String(val);
+      }
+    }
+    values.push(str.length > 300 ? str.slice(0, 297) + "..." : str);
+  }
+  return values;
+}
+
 /** Compute max and p75 string length from actual captured distinct values */
 function computeValueLengthStats(values: string[]): { max: number; p75: number } {
   if (values.length === 0) return { max: 0, p75: 0 };
@@ -110,9 +138,14 @@ async function inspectTable(
   const tableColumns = allColumns.filter((c) => c.table_name === tableName);
 
   const supported: RawColumn[] = [];
+  const jsonColumns: RawColumn[] = [];
   const skipped: SkippedColumn[] = [];
   for (const col of tableColumns) {
-    if (connector.isSkippedType(col.data_type)) {
+    if (connector.isJsonType(col.data_type)) {
+      // JSON/JSONB: not skipped — sampled separately for key discovery so its
+      // contents become queryable as connector-aware dimensions.
+      jsonColumns.push(col);
+    } else if (connector.isSkippedType(col.data_type)) {
       skipped.push({ name: col.column_name, type: col.data_type, reason: "unsupported type" });
       warnings.push(`Skipped stats for ${tableName}.${col.column_name} (${col.data_type} type)`);
     } else {
@@ -347,6 +380,51 @@ async function inspectTable(
 
     return result;
   });
+
+  // ── JSON/JSONB key discovery ────────────────────────────────
+  // Sample each JSON column, infer its common keys (top-level + one nesting
+  // level), and emit it as a ColumnInspection carrying json_keys. The keys
+  // become connector-aware dimensions at model build.
+  if (jsonColumns.length > 0 && rowCount > 0) {
+    let jsonRows: Record<string, unknown>[] = [];
+    try {
+      const jsonSample = await connector.getSampleRows(tableName, jsonColumns, JSON_SAMPLE_ROWS);
+      totalBytes += jsonSample.bytesProcessed;
+      jsonRows = jsonSample.rows;
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      warnings.push(`Failed to sample JSON column(s) in ${tableName}: ${msg.slice(0, 80)}`);
+    }
+
+    for (const col of jsonColumns) {
+      const rawValues = jsonRows.map((r) => r[col.column_name]);
+      const { keys, sampledRows } = inferJsonKeys(rawValues);
+      const nonNull = rawValues.filter((v) => v != null).length;
+      const exposable = keys.filter(
+        (k) => k.kind === "scalar" && k.frequency >= JSON_KEY_FREQUENCY_THRESHOLD,
+      ).length;
+
+      const result: ColumnInspection = {
+        name: col.column_name,
+        type: col.data_type,
+        normalized_type: "json",
+        nullable: col.is_nullable === "YES",
+        distinct_count: 0,
+        null_count: jsonRows.length > 0 ? jsonRows.length - nonNull : 0,
+        null_ratio: jsonRows.length > 0 ? (jsonRows.length - nonNull) / jsonRows.length : 0,
+        sample_values: extractJsonSampleValues(jsonRows, col.column_name),
+        stats_source: "sampled",
+        json_sampled_rows: sampledRows,
+        json_keys: keys,
+      };
+      columns.push(result);
+
+      warnings.push(
+        `Sampled JSON column ${tableName}.${col.column_name} (${col.data_type}): ` +
+          `${sampledRows} docs, ${keys.length} key(s) discovered, ${exposable} proposable (≥${Math.round(JSON_KEY_FREQUENCY_THRESHOLD * 100)}%)`,
+      );
+    }
+  }
 
   return {
     table: {

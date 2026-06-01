@@ -9,9 +9,25 @@
  * - SSL handling for cloud Postgres (Supabase, Neon, RDS).
  */
 
+import path from "node:path";
 import { BigQueryConnection } from "@malloydata/db-bigquery";
 import { PostgresConnection } from "@malloydata/db-postgres";
+import { DuckDBConnection } from "@malloydata/db-duckdb";
+import { MySQLConnection } from "@malloydata/db-mysql";
+import { SnowflakeConnection } from "@malloydata/db-snowflake";
 import type { ConnectorKind } from "./types.js";
+
+export interface SnowflakeConnOptions {
+  account: string;
+  username: string;
+  warehouse: string;
+  database: string;
+  schema?: string;
+  role?: string;
+  password?: string;
+  privateKeyPath?: string;
+  privateKeyPassphrase?: string;
+}
 
 export interface MalloyConnectionOptions {
   connectorKind?: ConnectorKind;
@@ -21,6 +37,29 @@ export interface MalloyConnectionOptions {
   location?: string;
   /** Postgres connection string. Falls back to POSTGRES_URL env. */
   postgresUrl?: string;
+  /** DuckDB file path. Falls back to DUCKDB_DATABASE env. */
+  duckdbPath?: string;
+  /** MySQL connection string. Falls back to MYSQL_URL env. */
+  mysqlUrl?: string;
+  /** Snowflake connection fields. Falls back to SNOWFLAKE_* env. */
+  snowflake?: SnowflakeConnOptions;
+}
+
+/** Resolve Snowflake options from the param or SNOWFLAKE_* env vars. */
+function resolveSnowflake(sf?: SnowflakeConnOptions): SnowflakeConnOptions | undefined {
+  const account = sf?.account ?? process.env.SNOWFLAKE_ACCOUNT;
+  const username = sf?.username ?? process.env.SNOWFLAKE_USER;
+  const warehouse = sf?.warehouse ?? process.env.SNOWFLAKE_WAREHOUSE;
+  const database = sf?.database ?? process.env.SNOWFLAKE_DATABASE;
+  if (!account || !username || !warehouse || !database) return undefined;
+  return {
+    account, username, warehouse, database,
+    schema: sf?.schema ?? process.env.SNOWFLAKE_SCHEMA ?? "PUBLIC",
+    role: sf?.role ?? process.env.SNOWFLAKE_ROLE,
+    password: sf?.password ?? process.env.SNOWFLAKE_PASSWORD,
+    privateKeyPath: sf?.privateKeyPath ?? process.env.SNOWFLAKE_PRIVATE_KEY_PATH,
+    privateKeyPassphrase: sf?.privateKeyPassphrase ?? process.env.SNOWFLAKE_PRIVATE_KEY_PASSPHRASE,
+  };
 }
 
 /**
@@ -33,8 +72,70 @@ export interface MalloyConnectionOptions {
  */
 export function buildMalloyConnection(
   options: MalloyConnectionOptions = {},
-): BigQueryConnection | PostgresConnection {
-  const { connectorKind, billingProject, location, postgresUrl } = options;
+): BigQueryConnection | PostgresConnection | DuckDBConnection | MySQLConnection | SnowflakeConnection {
+  const { connectorKind, billingProject, location, postgresUrl, duckdbPath, mysqlUrl } = options;
+
+  if (connectorKind === "mysql") {
+    const url = mysqlUrl ?? process.env.MYSQL_URL;
+    if (!url) {
+      throw new Error("MYSQL_URL not set; cannot compile MySQL model. Set MYSQL_URL to mysql://user:pass@host:3306/db.");
+    }
+    const parsed = new URL(url);
+    return new MySQLConnection("mysql", {
+      host: parsed.hostname,
+      port: parseInt(parsed.port || "3306", 10),
+      database: parsed.pathname.replace(/^\//, ""),
+      user: decodeURIComponent(parsed.username),
+      password: decodeURIComponent(parsed.password),
+    });
+  }
+
+  if (connectorKind === "snowflake") {
+    const sf = resolveSnowflake(options.snowflake);
+    if (!sf) {
+      throw new Error(
+        "Snowflake connection not configured; set SNOWFLAKE_ACCOUNT / SNOWFLAKE_USER / SNOWFLAKE_WAREHOUSE / SNOWFLAKE_DATABASE (and a password or key).",
+      );
+    }
+    const connOptions: Record<string, unknown> = {
+      account: sf.account,
+      username: sf.username,
+      warehouse: sf.warehouse,
+      database: sf.database,
+      schema: sf.schema ?? "PUBLIC",
+      ...(sf.role ? { role: sf.role } : {}),
+    };
+    if (sf.privateKeyPath) {
+      connOptions.authenticator = "SNOWFLAKE_JWT";
+      connOptions.privateKeyPath = sf.privateKeyPath;
+      if (sf.privateKeyPassphrase) connOptions.privateKeyPass = sf.privateKeyPassphrase;
+    } else {
+      connOptions.password = sf.password;
+    }
+    return new SnowflakeConnection("snowflake", {
+      // database/schema live inside connOptions for snowflake-sdk.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      connOptions: connOptions as any,
+    });
+  }
+
+  if (connectorKind === "duckdb") {
+    const dbPath = duckdbPath ?? process.env.DUCKDB_DATABASE;
+    if (!dbPath) {
+      throw new Error(
+        "DUCKDB_DATABASE not set; cannot compile DuckDB model. " +
+        "Point at a .duckdb file or a Parquet/CSV file (set DUCKDB_DATABASE).",
+      );
+    }
+    const ext = path.extname(dbPath).toLowerCase();
+    const isDbFile = ext === ".duckdb" || ext === ".db" || dbPath === ":memory:";
+    return new DuckDBConnection({
+      name: "duckdb",
+      // Data files are read from :memory: via `duckdb.table('<path>')`.
+      databasePath: isDbFile ? dbPath : ":memory:",
+      workingDirectory: process.cwd(),
+    });
+  }
 
   if (connectorKind === "postgres") {
     const connectionString = postgresUrl ?? process.env.POSTGRES_URL;

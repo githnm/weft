@@ -3,6 +3,7 @@ import readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { proposeModelPlan, formatPlanMarkdown } from "../../interview/plan.js";
 import { buildModelWithClarification } from "../../interview/build.js";
+import { bakeDefinition } from "../../interview/definitions.js";
 import { resolveSubstrateDir, resolveSemanticModelsDir } from "../../models/manifest.js";
 import type { Decision, ResolvedDecision, ClarifyQuestion, ClarifyAnswer } from "../../interview/types.js";
 
@@ -59,6 +60,15 @@ export async function runModelDesign(options: ModelDesignOptions): Promise<void>
   }
   console.log("");
 
+  // ── Step 2.5: Open custom definitions (unbounded business meaning) ──
+  // The fixed decisions cover universal structure; this captures business terms
+  // in the user's own words. Each is baked into model.malloy (a dimension /
+  // measure) so it auto-applies.
+  const definitions = options.acceptDefaults ? [] : await promptDefinitions();
+  if (definitions.length > 0) {
+    console.log(`  ${definitions.length} custom definition(s) will be baked into the model after the build.\n`);
+  }
+
   // ── Step 3: Build model ──
   console.log("  Step 2/2: Building semantic model...\n");
 
@@ -101,6 +111,28 @@ export async function runModelDesign(options: ModelDesignOptions): Promise<void>
     console.log(`  ⚠ ${result.compile_warning}`);
   }
 
+  // ── Step 3.5: Bake the custom definitions (concept + explicit aliases) ──
+  // Done as post-build refinements so each maps cleanly to one baked field.
+  if (definitions.length > 0) {
+    console.log("");
+    console.log("  Baking custom definitions...");
+    for (const def of definitions) {
+      const baked = await bakeDefinition({
+        modelName: options.name,
+        semanticModelsDir,
+        definition: def.text,
+        aliases: def.aliases,
+        billingProject: options.billingProject,
+      });
+      if (baked.applied && baked.concept) {
+        const akas = baked.concept.aliases.length ? ` (aka ${baked.concept.aliases.join(", ")})` : "";
+        console.log(`    ✓ ${baked.concept.canonical_name}${akas} → ${baked.concept.field}`);
+      } else {
+        console.log(`    ⚠ not baked ("${def.text.slice(0, 50)}"): ${baked.reason ?? baked.error ?? "no change"}`);
+      }
+    }
+  }
+
   // Data warnings — measures that compiled but produce no data (caught before
   // the user hits them at query time).
   if (hasDataWarnings) {
@@ -138,6 +170,30 @@ export async function runModelDesign(options: ModelDesignOptions): Promise<void>
   console.log(`    - Ask questions: pnpm cli ask "..." --model ${options.name}`);
   console.log(`    - View model:    pnpm cli model show ${options.name}`);
   console.log("");
+}
+
+// ── Interactive custom-definitions prompting (open step) ──────────
+
+async function promptDefinitions(): Promise<{ text: string; aliases: string[] }[]> {
+  const rl = readline.createInterface({ input, output });
+  const defs: { text: string; aliases: string[] }[] = [];
+  try {
+    console.log("  Custom definitions (optional)");
+    console.log("  Add business terms in your own words — baked into the model so questions using");
+    console.log("  them (or any alias you list) auto-apply. e.g. \"customers = exclude internal accounts\".");
+    console.log("  Blank definition when done.\n");
+    for (;;) {
+      const line = (await rl.question(`  definition ${defs.length + 1} (blank to finish): `)).trim();
+      if (!line) break;
+      const aliasRaw = (await rl.question("    aliases (optional, comma-separated): ")).trim();
+      const aliases = aliasRaw.split(",").map((s) => s.trim()).filter(Boolean);
+      defs.push({ text: line, aliases });
+    }
+    console.log("");
+  } finally {
+    rl.close();
+  }
+  return defs;
 }
 
 // ── Interactive clarification prompting (type-B build ambiguities) ──

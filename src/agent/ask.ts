@@ -14,6 +14,7 @@ import { classifyFollowUp } from "../session/follow-up.js";
 import { extractFilters, extractGroupBy, extractAggregates, extractTimeRange } from "../session/parse-malloy.js";
 import { looksLikeCorrection, classifyCorrection } from "../correct/classify.js";
 import { captureAskOutcome } from "../context/instrument.js";
+import { loadConcepts, buildConceptsPrompt } from "../interview/definitions.js";
 import type { ConnectorKind } from "../connectors/types.js";
 import type { AskResult, SourceSummary, LLMUsage, FollowUpResult } from "./types.js";
 import type { Session, SessionContext } from "../session/types.js";
@@ -76,6 +77,23 @@ function addUsage(a: LLMUsage, b: LLMUsage): LLMUsage {
     inputTokens: a.inputTokens + b.inputTokens,
     outputTokens: a.outputTokens + b.outputTokens,
   };
+}
+
+/**
+ * Scope loaded terms to the selected source.
+ *
+ * A semantic model is self-contained: its `model.malloy` is the single
+ * queryable source and its terms.json holds only that model's terms. So every
+ * term applies when querying the model, regardless of which base-table file it
+ * happened to be tagged to at define time. Substrate sources (one file per
+ * table, sharing a terms.json) stay scoped per source filename.
+ */
+function scopeTermsForSource(
+  allTerms: Awaited<ReturnType<typeof loadTerms>>,
+  sourceFilename: string,
+): Awaited<ReturnType<typeof loadTerms>> {
+  if (sourceFilename === "model.malloy") return allTerms;
+  return filterTermsForSource(allTerms, sourceFilename);
 }
 
 export async function ask(options: AskOptions): Promise<AskResult> {
@@ -264,7 +282,12 @@ export async function ask(options: AskOptions): Promise<AskResult> {
 
   // ── Load terms (optional) ────────────────────────────────────
   const allTerms = await loadTerms(modelsDir);
-  const sourceTerms = filterTermsForSource(allTerms, sourceSelection.filename);
+  const sourceTerms = scopeTermsForSource(allTerms, sourceSelection.filename);
+
+  // ── Load baked concepts + their explicit aliases (model metadata) ──
+  // Injected into feasibility + generate so any confirmed alias applies the
+  // concept's filter. Empty string when the model has no concepts.
+  const conceptsPrompt = buildConceptsPrompt(await loadConcepts(modelsDir));
 
   // ── STAGE 1.5: Feasibility check ─────────────────────────────
   let feasibility: Awaited<ReturnType<typeof checkFeasibility>> | undefined;
@@ -277,6 +300,7 @@ export async function ask(options: AskOptions): Promise<AskResult> {
       importedFiles: importedFiles.size > 0 ? importedFiles : undefined,
       sourceMetadata: sourceMetadata ?? undefined,
       sourceTerms: Object.keys(sourceTerms).length > 0 ? sourceTerms : undefined,
+      concepts: conceptsPrompt || undefined,
       sessionContext,
     });
     totalUsage = addUsage(totalUsage, feasibility.usage);
@@ -302,7 +326,7 @@ export async function ask(options: AskOptions): Promise<AskResult> {
         }
 
         const newMeta = metadata ? getSourceMetadata(metadata, sourceSelection.sourceName) : null;
-        const newTerms = filterTermsForSource(allTerms, sourceSelection.filename);
+        const newTerms = scopeTermsForSource(allTerms, sourceSelection.filename);
 
         feasibility = await checkFeasibility({
           question,
@@ -311,6 +335,7 @@ export async function ask(options: AskOptions): Promise<AskResult> {
           importedFiles: newImports.size > 0 ? newImports : undefined,
           sourceMetadata: newMeta ?? undefined,
           sourceTerms: Object.keys(newTerms).length > 0 ? newTerms : undefined,
+          concepts: conceptsPrompt || undefined,
         });
         totalUsage = addUsage(totalUsage, feasibility.usage);
 
@@ -357,6 +382,7 @@ export async function ask(options: AskOptions): Promise<AskResult> {
     sourceMetadata: finalMeta ?? undefined,
     matchedEnumValues: feasibility?.matchedEnumValues,
     matchedTerms: feasibility?.matchedTerms,
+    concepts: conceptsPrompt || undefined,
     sessionContext,
   });
   totalUsage = addUsage(totalUsage, query.usage);

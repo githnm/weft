@@ -30,3 +30,7 @@ semantic-models/
 context-graph.html
 *-graph.html
 *.context-graph.html
+
+# local connection credentials (machine-only, never commit)
+.weft/
+connections.json

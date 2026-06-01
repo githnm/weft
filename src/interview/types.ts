@@ -148,6 +148,15 @@ export interface RefinementClassification {
   reasoning: string;
   /** If not feasible, what's missing */
   missing?: string[];
+  /**
+   * UNDERSPECIFIED, not impossible: the concept is expressible with fields that
+   * DO exist (email, name, domain, timestamps…), but the request didn't say HOW
+   * to compute it. When true, this is a clarification — NOT a flat refusal.
+   * (Distinct from `feasible:false` with no relevant field, which is impossible.)
+   */
+  needs_clarification?: boolean;
+  /** A specific, field-grounded question to ask the user when underspecified. */
+  clarification_question?: string;
 }
 
 export interface RefinementResult {
@@ -166,6 +175,13 @@ export interface RefinementResult {
   draft_malloy?: string;
   /** Warning (e.g. compile timeout but saved anyway) */
   compile_warning?: string;
+  /**
+   * The request is underspecified but groundable — ask this question, then
+   * re-submit with the answer appended. Set when the classifier marked the
+   * change as needing clarification rather than impossible.
+   */
+  needs_clarification?: boolean;
+  clarification_question?: string;
   usage: LLMUsage;
 }
 

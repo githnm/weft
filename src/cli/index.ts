@@ -41,13 +41,22 @@ program
   .command("introspect")
   .description("Introspect a warehouse dataset and generate Malloy model files")
   .option("--output <dir>", "Output directory for generated files (default: ./substrate or $DEFAULT_SUBSTRATE_DIR)")
-  .option("--connector <type>", "Connector type: bigquery or postgres", "bigquery")
+  .option("--connector <type>", "Connector type: bigquery, postgres, duckdb, mysql, or snowflake", "bigquery")
   .option("--project <project>", "GCP project that owns the dataset (BigQuery)")
   .option("--dataset <dataset>", "BigQuery dataset name (BigQuery)")
   .option("--billing-project <project>", "GCP project for billing (defaults to BQ_PROJECT_ID env var)")
   .option("--location <region>", "BigQuery dataset region (e.g. US, EU, asia-northeast1)", "US")
-  .option("--connection-string <url>", "Postgres connection string (postgres://user:pass@host:port/db)")
+  .option("--connection-string <url>", "Postgres/MySQL connection string (postgres://… or mysql://…)")
   .option("--pg-schema <schema>", "Postgres schema to introspect (default: public)", "public")
+  .option("--file <path>", "DuckDB file path — a .duckdb file or a Parquet/CSV (DuckDB connector)")
+  .option("--sf-account <account>", "Snowflake account identifier (org-account, e.g. myorg-myaccount)")
+  .option("--sf-user <user>", "Snowflake username")
+  .option("--sf-warehouse <wh>", "Snowflake warehouse")
+  .option("--sf-database <db>", "Snowflake database")
+  .option("--sf-schema <schema>", "Snowflake schema (default: PUBLIC)", "PUBLIC")
+  .option("--sf-role <role>", "Snowflake role (optional)")
+  .option("--sf-password <pw>", "Snowflake password (or use --sf-key for key-pair auth)")
+  .option("--sf-key <path>", "Snowflake private key file path (key-pair auth)")
   .option("--sample-rows <n>", "Number of sample rows per table", "1000")
   .option("--exclude-enum <columns...>", "Force-skip enum capture for these table.column pairs (e.g. bikeshare_stations.address)")
   .action(async (opts: {
@@ -59,6 +68,15 @@ program
     location: string;
     connectionString?: string;
     pgSchema: string;
+    file?: string;
+    sfAccount?: string;
+    sfUser?: string;
+    sfWarehouse?: string;
+    sfDatabase?: string;
+    sfSchema: string;
+    sfRole?: string;
+    sfPassword?: string;
+    sfKey?: string;
     sampleRows: string;
     excludeEnum?: string[];
   }) => {
@@ -66,7 +84,48 @@ program
       const outputDir = opts.output ?? resolveSubstrateDir();
       let connector;
 
-      if (opts.connector === "postgres") {
+      if (opts.connector === "duckdb") {
+        const filePath = opts.file ?? process.env.DUCKDB_DATABASE;
+        if (!filePath) {
+          console.error(
+            "Error: --file or DUCKDB_DATABASE must be set for the DuckDB connector.\n" +
+              "Point at a .duckdb file or a Parquet/CSV — no server needed.\n" +
+              "Example: --connector duckdb --file ./data/events.parquet",
+          );
+          process.exit(1);
+        }
+        connector = createConnector({ kind: "duckdb", filePath });
+      } else if (opts.connector === "mysql") {
+        const connectionString = opts.connectionString ?? process.env.MYSQL_URL;
+        if (!connectionString) {
+          console.error(
+            "Error: --connection-string or MYSQL_URL must be set for the MySQL connector.\n" +
+              "Example: --connection-string mysql://user:pass@host:3306/mydb",
+          );
+          process.exit(1);
+        }
+        connector = createConnector({ kind: "mysql", connectionString });
+      } else if (opts.connector === "snowflake") {
+        const account = opts.sfAccount ?? process.env.SNOWFLAKE_ACCOUNT;
+        const username = opts.sfUser ?? process.env.SNOWFLAKE_USER;
+        const warehouse = opts.sfWarehouse ?? process.env.SNOWFLAKE_WAREHOUSE;
+        const database = opts.sfDatabase ?? process.env.SNOWFLAKE_DATABASE;
+        if (!account || !username || !warehouse || !database) {
+          console.error(
+            "Error: Snowflake requires --sf-account, --sf-user, --sf-warehouse, --sf-database (or the SNOWFLAKE_* env vars).",
+          );
+          process.exit(1);
+        }
+        connector = createConnector({
+          kind: "snowflake",
+          account, username, warehouse, database,
+          schema: opts.sfSchema,
+          role: opts.sfRole,
+          password: opts.sfPassword ?? process.env.SNOWFLAKE_PASSWORD,
+          privateKeyPath: opts.sfKey ?? process.env.SNOWFLAKE_PRIVATE_KEY_PATH,
+          privateKeyPassphrase: process.env.SNOWFLAKE_PRIVATE_KEY_PASSPHRASE,
+        });
+      } else if (opts.connector === "postgres") {
         const connectionString = opts.connectionString ?? process.env.POSTGRES_URL;
         if (!connectionString) {
           console.error(
@@ -364,38 +423,54 @@ program
   .option("--confirm", "Confirm a pending auto-proposed term")
   .option("--description <desc>", "Description of the term (for manual mode)")
   .option("--source <file>", "Source .malloy filename to attach the term to")
-  .requiredOption("--models <dir>", "Directory containing .malloy files")
+  .option("--model <name>", "Named semantic model to attach the term to (terms save in that model's dir, where 'ask --model' reads them)")
+  .option("--semantic-models <dir>", "Parent directory for semantic models (default: ./semantic-models)")
+  .option("--models <dir>", "Directory containing .malloy files (default: ./models or $DEFAULT_MODELS_DIR). Ignored when --model is set.")
   .option("--billing-project <project>", "GCP project for billing (defaults to BQ_PROJECT_ID env var)")
   .action(async (term: string, opts: {
     confirm?: boolean;
     description?: string;
     source?: string;
-    models: string;
+    model?: string;
+    semanticModels?: string;
+    models?: string;
     billingProject?: string;
   }) => {
+    // Resolve the target dir the same way `ask` does: --model points at the
+    // semantic model's own dir (where ask reads its terms), else --models.
+    let modelsDir: string;
+    if (opts.model) {
+      const semanticModelsDir = resolveSemanticModelsDir(opts.semanticModels);
+      modelsDir = path.resolve(path.join(semanticModelsDir, opts.model));
+    } else {
+      modelsDir = opts.models ?? process.env.DEFAULT_MODELS_DIR ?? resolveSubstrateDir();
+    }
+
     const billingProject = opts.billingProject ?? process.env.BQ_PROJECT_ID;
-    if (!billingProject) {
+    // Connector-aware: BigQuery needs a billing project, Postgres does not.
+    const connectorKind = await detectConnectorKind(modelsDir);
+    if (connectorKind === "bigquery" && !billingProject) {
       console.error(
-        "Error: --billing-project or BQ_PROJECT_ID must be set.\n" +
+        "Error: --billing-project or BQ_PROJECT_ID must be set for BigQuery models.\n" +
           "Example: --billing-project my-project  or  export BQ_PROJECT_ID=my-project"
       );
       process.exit(1);
     }
 
     if (opts.confirm) {
-      await runDefineConfirm({ term, modelsDir: opts.models, billingProject });
+      await runDefineConfirm({ term, modelsDir, billingProject });
     } else {
       if (!opts.description) {
         console.error("Error: --description is required for manual term definition.");
-        console.error("Usage: pnpm cli define <term> --description \"...\" --models <dir>");
-        console.error("   Or: pnpm cli define <term> --confirm --models <dir>");
+        console.error("Usage: pnpm cli define <term> --description \"...\" --model <name>");
+        console.error("   Or: pnpm cli define <term> --confirm --model <name>");
         process.exit(1);
       }
       await runDefineManual({
         term,
         description: opts.description,
         source: opts.source,
-        modelsDir: opts.models,
+        modelsDir,
         billingProject,
       });
     }
@@ -502,7 +577,7 @@ program
       connectorKind = await detectConnectorKind(modelsDir);
     }
 
-    if (connectorKind !== "postgres" && !billingProject) {
+    if (connectorKind === "bigquery" && !billingProject) {
       console.error(
         "Error: --billing-project or BQ_PROJECT_ID must be set for BigQuery models.\n" +
           "Example: --billing-project my-project  or  export BQ_PROJECT_ID=my-project"
@@ -665,7 +740,7 @@ modelCmd
     // Only require billing_project for BigQuery substrates
     const substrateDir = path.resolve(resolveSubstrateDir(opts.substrateDir));
     const connectorKind = await detectConnectorKind(substrateDir);
-    if (connectorKind !== "postgres" && !billingProject) {
+    if (connectorKind === "bigquery" && !billingProject) {
       console.error(
         "Error: --billing-project or BQ_PROJECT_ID must be set for BigQuery substrates.\n" +
           "The Malloy compiler needs it to resolve table schemas during validation.\n" +
@@ -723,7 +798,7 @@ modelCmd
       }
     } catch { /* will be caught by refineModel */ }
 
-    if (modelConnectorKind !== "postgres" && !billingProject) {
+    if (modelConnectorKind === "bigquery" && !billingProject) {
       console.error(
         "Error: --billing-project or BQ_PROJECT_ID must be set for BigQuery models.\n" +
           "Example: --billing-project my-project  or  export BQ_PROJECT_ID=my-project"
@@ -779,7 +854,7 @@ modelCmd
       }
     } catch { /* will be surfaced by simulateChange */ }
 
-    if (modelConnectorKind !== "postgres" && !billingProject) {
+    if (modelConnectorKind === "bigquery" && !billingProject) {
       console.error(
         "Error: --billing-project or BQ_PROJECT_ID must be set for BigQuery models.\n" +
           "Example: --billing-project my-project  or  export BQ_PROJECT_ID=my-project"

@@ -4,6 +4,7 @@ import { AppSidebar, type View } from "@/components/app-sidebar";
 import { AskScreen } from "@/screens/ask";
 import { ModelsScreen } from "@/screens/models";
 import { ContextScreen } from "@/screens/context";
+import { ConnectionsScreen } from "@/screens/connections";
 
 export default function App() {
   const [view, setView] = useState<View>("ask");
@@ -15,6 +16,7 @@ export default function App() {
         {view === "ask" && <AskScreen />}
         {view === "models" && <ModelsScreen />}
         {view === "context" && <ContextScreen />}
+        {view === "connections" && <ConnectionsScreen />}
       </main>
     </div>
   );

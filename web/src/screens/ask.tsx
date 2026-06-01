@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ChevronDown, CornerDownLeft, Database, Wrench, X } from "lucide-react";
+import { ChevronDown, CornerDownLeft, Database, Sparkles, Wrench, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -8,18 +8,29 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { ProgressStages, type Stage } from "@/components/progress-stages";
+import { type TimelineTone } from "@/components/stage-pill";
 import { VerificationCallout } from "@/components/verification-callout";
 import { MalloyBlock } from "@/components/malloy-block";
 import { ResultsTable } from "@/components/results-table";
 import {
+  addDefinition,
   askStream,
   correct,
   fetchModels,
   type AskResult,
   type CorrectResult,
+  type DefinitionOutcome,
   type ModelInfo,
   type StageEvent,
 } from "@/lib/api";
+
+/** Parse a comma/newline-separated aliases input into a clean list. */
+function parseAliases(raw: string): string[] {
+  return raw
+    .split(/[,\n]/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
 
 const STAGE_LABELS = [
   "Selecting source",
@@ -28,6 +39,11 @@ const STAGE_LABELS = [
   "Executing query",
   "Verifying result",
 ];
+
+// Map each streaming stage to an AI-timeline pastel (Cursor signature):
+// reading the source → blue, reasoning feasibility → peach, writing the query
+// → lavender, running it → mint, final verification → gold.
+const STAGE_TONES: TimelineTone[] = ["read", "thinking", "edit", "grep", "done"];
 
 // Each stage event means the engine FINISHED that step; advance to the next.
 const NEXT_ACTIVE: Record<StageEvent["stage"], number> = {
@@ -98,6 +114,7 @@ export function AskScreen() {
 
   const stages: Stage[] = STAGE_LABELS.map((label, i) => ({
     label,
+    tone: STAGE_TONES[i],
     state: i < stageIndex ? "done" : i === stageIndex ? "active" : "pending",
   }));
 
@@ -106,7 +123,7 @@ export function AskScreen() {
       {/* Composer */}
       <div className="flex flex-col gap-3">
         <div className="flex items-center justify-between">
-          <h1 className="text-base font-medium tracking-tight">Ask</h1>
+          <h1 className="text-lg font-normal tracking-tight">Ask</h1>
           <ModelPicker models={models} value={model} onChange={setModel} />
         </div>
 
@@ -153,7 +170,7 @@ export function AskScreen() {
 
           {/* Question echo */}
           <div className="flex flex-col gap-1">
-            <p className="text-base font-medium tracking-tight">{answered}</p>
+            <p className="text-lg font-normal tracking-tight">{answered}</p>
             {result?.source.name && (
               <p className="text-sm text-muted-foreground">
                 Source <span className="font-mono text-foreground">{result.source.name}</span>
@@ -273,19 +290,35 @@ function ResultView({ result, model }: { result: AskResult; model: string }) {
 function CorrectionBox({ model }: { model: string }) {
   const [open, setOpen] = useState(false);
   const [text, setText] = useState("");
+  const [appliedText, setAppliedText] = useState("");
   const [busy, setBusy] = useState(false);
   const [outcome, setOutcome] = useState<CorrectResult | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  // Promote a correction-that's-really-a-definition to a baked-in model term.
+  const [baking, setBaking] = useState(false);
+  const [baked, setBaked] = useState<DefinitionOutcome | null>(null);
+  const [bakeAliases, setBakeAliases] = useState("");
 
   const apply = () => {
     if (!text.trim() || busy) return;
     setBusy(true);
     setErr(null);
     setOutcome(null);
+    setBaked(null);
+    setAppliedText(text.trim());
     correct(text.trim(), model)
       .then((r) => setOutcome(r))
       .catch((e) => setErr(e instanceof Error ? e.message : String(e)))
       .finally(() => setBusy(false));
+  };
+
+  const bake = () => {
+    if (!appliedText || baking) return;
+    setBaking(true);
+    addDefinition(model, appliedText, parseAliases(bakeAliases))
+      .then(setBaked)
+      .catch((e) => setErr(e instanceof Error ? e.message : String(e)))
+      .finally(() => setBaking(false));
   };
 
   if (!open) {
@@ -352,8 +385,56 @@ function CorrectionBox({ model }: { model: string }) {
           {outcome.reasoning}
         </VerificationCallout>
       )}
+
+      {/* Promote a definition-style correction to a permanent, baked-in model term. */}
+      {outcome && outcome.type !== "unclear" && !baked && (
+        <div className="flex flex-col gap-2 border-t border-border pt-2.5">
+          <span className="text-xs text-muted-foreground">
+            Is this a lasting definition? Bake it into the model so it always applies — and list any
+            aliases (other words for the same concept) explicitly.
+          </span>
+          <div className="flex items-center gap-2">
+            <Input
+              value={bakeAliases}
+              onChange={(e) => setBakeAliases(e.target.value)}
+              placeholder="also called (optional): customers, accounts"
+              className="font-mono"
+            />
+            <Button size="sm" variant="ghost" className="shrink-0 gap-1.5 text-muted-foreground" onClick={bake} disabled={baking}>
+              {baking ? <Loader2Spin /> : <Sparkles className="size-3.5" />}
+              {baking ? "Baking…" : "Make permanent"}
+            </Button>
+          </div>
+        </div>
+      )}
+      {baked?.applied && baked.concept && (
+        <VerificationCallout kind="verified" title={`Baked into the model: ${baked.concept.canonical_name}`}>
+          <div className="flex flex-col gap-1">
+            <span>It now applies to every future question — it’s in model.malloy, not terms.json.</span>
+            {baked.concept.aliases.length > 0 && (
+              <span className="flex flex-wrap items-center gap-1.5">
+                <span className="text-xs text-muted-foreground">also applies for:</span>
+                {baked.concept.aliases.map((a) => (
+                  <Badge key={a} variant="outline">
+                    {a}
+                  </Badge>
+                ))}
+              </span>
+            )}
+          </div>
+        </VerificationCallout>
+      )}
+      {baked && !baked.applied && (
+        <VerificationCallout kind="caveat" title={baked.noChange ? "Already in the model" : "Could not bake in"}>
+          {baked.reason ?? baked.error ?? ""}
+        </VerificationCallout>
+      )}
     </div>
   );
+}
+
+function Loader2Spin() {
+  return <span className="inline-block size-3.5 animate-spin rounded-full border-2 border-muted-foreground border-t-transparent" />;
 }
 
 function ModelPicker({
@@ -371,7 +452,7 @@ function ModelPicker({
         value={value}
         onChange={(e) => onChange(e.target.value)}
         disabled={models.length === 0}
-        className="h-8 appearance-none rounded-md border border-input bg-background py-0 pl-2.5 pr-7 font-mono text-xs text-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background disabled:opacity-50"
+        className="h-8 appearance-none rounded-md border border-input bg-card py-0 pl-2.5 pr-7 font-mono text-xs text-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background disabled:opacity-50"
       >
         {models.length === 0 && <option value="">no models</option>}
         {models.map((m) => (

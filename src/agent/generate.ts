@@ -60,6 +60,9 @@ interface GenerateOptions {
   matchedEnumValues?: EnumMatch[];
   /** Pre-defined business terms matched during feasibility — use their filters directly */
   matchedTerms?: MatchedTerm[];
+  /** Baked concept → alias map (built by buildConceptsPrompt). Tells the
+   *  generator which words resolve to which baked field. */
+  concepts?: string;
   /** Session context for follow-up queries — inherit filters/group_by from prior turn */
   sessionContext?: SessionContext;
 }
@@ -109,7 +112,7 @@ function formatMatchedTerms(terms: MatchedTerm[]): string {
 }
 
 export async function generateQuery(options: GenerateOptions): Promise<GeneratedQuery> {
-  const { question, sourceName, sourceContent, importedFiles, sourceMetadata, matchedEnumValues, matchedTerms, sessionContext } = options;
+  const { question, sourceName, sourceContent, importedFiles, sourceMetadata, matchedEnumValues, matchedTerms, concepts, sessionContext } = options;
 
   const userParts: string[] = [];
 
@@ -140,6 +143,11 @@ export async function generateQuery(options: GenerateOptions): Promise<Generated
   // Part B.7: matched business terms (pre-defined filters — highest priority)
   if (matchedTerms && matchedTerms.length > 0) {
     userParts.push(formatMatchedTerms(matchedTerms));
+  }
+
+  // Part B.8: baked concept → alias map (apply the filter for any confirmed alias)
+  if (concepts) {
+    userParts.push(concepts);
   }
 
   // Part D: session context for follow-up queries

@@ -120,7 +120,7 @@ export function register(server: McpServer): void {
         const modelDir = resolveModelDir(semanticModelsDir, args.model_name);
         const connectorKind = await detectConnectorKind(modelDir);
         const billingProject = resolveBillingProject(args.billing_project);
-        if (connectorKind !== "postgres" && !billingProject) {
+        if (connectorKind === "bigquery" && !billingProject) {
           throw new McpError(
             ErrorCode.InvalidParams,
             "billing_project is required for BigQuery models. Provide it as a tool input or set the BQ_PROJECT_ID environment variable.",

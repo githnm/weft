@@ -42,7 +42,7 @@ MODEL GENERATION RULES:
 SELF-CONTAINED MODEL — NO IMPORTS:
 - Do NOT use import statements. The model must be entirely self-contained.
 - Declare each table source directly using the connector table expression provided in the catalog (e.g. postgres.table('public.users_data') or bigquery.table('project.dataset.table')).
-- Only define sources that you actually join or extend. Do not declare sources you don't use.
+- The TABLE CATALOG contains EXACTLY the tables the user selected — no more, no fewer. Declare a top-level source for EVERY table in the catalog. Join/extend the ones the purpose needs into the primary source; any selected table that does not fit the primary join graph (see the join limit below) still gets its own standalone top-level source so it stays queryable. Do NOT silently omit a selected table, and NEVER reference a table that is not in the catalog.
 
 SINGLE SOURCE, MINIMAL JOINS:
 - Define exactly ONE primary source using \`extend\`. This is the model's entry point.
@@ -57,11 +57,18 @@ MEASURES AND DIMENSIONS:
 - Add 2-4 dimensions that are derived or computed (e.g. date truncations, case expressions, bucketed ranges). Do NOT redeclare pass-through columns — they are already available from the source table.
 - Add 1-2 starter views.
 
+JSON / JSONB COLUMNS:
+- The catalog lists discovered keys for JSON columns under "↳ JSON column", with a ready-to-use, connector-aware extraction expression for each PROPOSABLE key.
+- To expose a JSON key as a dimension, copy its extraction expression VERBATIM. The catalog already gives you the full line, e.g. \`dimension: browser is jsonb_extract_path_text!(event_props, 'browser')\` (Postgres) or \`dimension: browser is JSON_VALUE!(event_props, '$.browser')\` (BigQuery). These use Malloy's raw-SQL function form (\`fn!(...)\`) with a \`::number\`/\`::boolean\`/\`::timestamp\` cast for non-strings. Do NOT rewrite them with raw \`->>\`/\`->\` operators — Malloy cannot parse those. Use exactly what the catalog provides.
+- Only expose keys the purpose/decisions actually need. Do NOT expose keys marked "available but NOT auto-exposed" (arrays need unnest; deeply-nested and below-threshold keys are not reliable). Never invent a key that isn't in the catalog.
+- A JSON-derived dimension is a normal scalar dimension — name it after the key (suffix with _derived if it collides with a column).
+
 DECISION CONTRACT — the model MUST materialize every resolved decision (these are not optional; the build verifies them after compile):
 - TIME ANCHOR: if a decision names a time/date/creation column or a time grain, you MUST add a time dimension exposing it so time-series group_by works — e.g. \`dimension: created_month is created_at.month\` (also add _day/_year if useful). Do not rely on the raw column alone.
 - CONVERSION / RATE / RATIO metrics: if a decision calls for conversion rates, ratios, or per-X metrics, you MUST define them as MEASURES using the ratio pattern with a zero-guard: \`measure: x_rate is numerator_measure / nullif(denominator_measure, 0)\`. Define the numerator and denominator measures too. Do not leave ratios for the query layer to improvise.
 - FUNNEL STAGES: if a decision defines funnel stages, add one count measure per stage (rows reaching that stage), so stage-to-stage conversion can be computed.
 - GRAIN: if a decision sets the grain (e.g. per account, per user per day), the primary source must be at that grain.
+- CUSTOM DEFINITIONS: if business definitions are provided, bake EACH into the model as reusable vocabulary — a boolean dimension \`is_<concept>\` for a segment ("customers", "active users") or a measure for a metric — grounded in real columns. These are how the model carries business meaning, so a later question that mentions the concept resolves to the baked-in field automatically.
 
 EXPRESSION RULES:
 - Null checks: use \`x is not null\` / \`x is null\`. NEVER use \`x != null\` or \`x == null\` — these are not valid Malloy.
@@ -445,6 +452,13 @@ export interface BuildModelOptions {
   billingProject?: string;
   decisions: ResolvedDecision[];
   relevantTables: RelevantTable[];
+  /**
+   * Open business definitions in the user's own words (e.g.
+   * "customers = exclude internal accounts and test workspaces"). Each is baked
+   * INTO model.malloy as a reusable boolean dimension / measure, so questions
+   * referencing it auto-apply. Unbounded — zero or many.
+   */
+  definitions?: string[];
   /** Corrective guidance appended to the generate prompt (auto-fix loop). */
   corrective?: string;
   /** Authoritative user answers to clarification questions (rebuild input). */
@@ -460,6 +474,7 @@ interface BuildContext {
   billingProject?: string;
   decisions: ResolvedDecision[];
   relevantTables: RelevantTable[];
+  definitions: string[];
   inspection: InspectionResult;
   connectorKind: ConnectorKind | undefined;
   tableCatalog: string;
@@ -520,7 +535,7 @@ async function buildContext(options: BuildModelOptions): Promise<BuildContext> {
   }
 
   const connectorKind = inspection.connector_kind as ConnectorKind | undefined;
-  if (connectorKind !== "postgres" && !billingProject && !process.env.BQ_PROJECT_ID) {
+  if (connectorKind === "bigquery" && !billingProject && !process.env.BQ_PROJECT_ID) {
     throw new Error(
       "billing_project is required for BigQuery models. Set via parameter or BQ_PROJECT_ID env var.",
     );
@@ -532,7 +547,8 @@ async function buildContext(options: BuildModelOptions): Promise<BuildContext> {
 
   return {
     name, purpose, substrateDir, semanticModelsDir, billingProject,
-    decisions, relevantTables, inspection, connectorKind, tableCatalog, decisionsText, tableNames,
+    decisions, relevantTables, definitions: options.definitions ?? [],
+    inspection, connectorKind, tableCatalog, decisionsText, tableNames,
   };
 }
 
@@ -559,6 +575,24 @@ async function generateValidatedModel(
         clarifications.map((c) => `Q: ${c.question}\nA: ${c.answer}`).join("\n\n"),
     );
   }
+  if (ctx.definitions.length > 0) {
+    genParts.push(
+      "CUSTOM BUSINESS DEFINITIONS (the user's own words — BAKE EACH into the model so it auto-applies):\n" +
+        ctx.definitions.map((d, i) => `${i + 1}. ${d}`).join("\n") +
+        "\n\nFor each definition: ground it in REAL columns and add it as reusable vocabulary — a boolean " +
+        "dimension `is_<concept>` for a segment (e.g. `dimension: is_customer is not is_internal and ...`), " +
+        "or a measure for a metric. Name it after the concept so questions that mention it resolve to it. " +
+        "Do NOT drop a definition silently; if a column it needs is missing, note it in the summary.",
+    );
+  }
+  genParts.push(
+    "SELECTED TABLES (user-chosen — AUTHORITATIVE; these OVERRIDE the decisions if a decision implies a different set):\n" +
+      ctx.tableNames.map((t) => `- ${t}`).join("\n") +
+      "\n\nThe user explicitly chose this exact set on the Tables step — it may differ from the AI's original proposal " +
+      "(tables added or removed). Build the model from ONLY these tables: declare a source for EACH one (primary, joined, " +
+      "or standalone top-level if it doesn't fit the join graph) and NEVER reference a table outside this list. " +
+      "If a resolved decision names a table that is no longer selected, ignore that part of the decision.",
+  );
   genParts.push(
     `PURPOSE: ${ctx.purpose}\n\nRESOLVED DECISIONS:\n${ctx.decisionsText}\n\nGenerate a self-contained model.malloy with NO import statements. Return JSON only.`,
   );
@@ -946,7 +980,11 @@ interface AssembleOptions {
 }
 
 async function assembleModel(opts: AssembleOptions): Promise<BuildResult> {
-  const allBaseTables = opts.parsed.summary.base_tables ?? opts.tableNames;
+  // The user's selected table set is authoritative — NOT the LLM's self-reported
+  // summary.base_tables (which only lists what it chose to use, dropping any
+  // user-added table). base_tables drives downstream refine/ask, so it must
+  // reflect exactly what the user selected on the Tables step.
+  const allBaseTables = opts.tableNames.length > 0 ? opts.tableNames : (opts.parsed.summary.base_tables ?? []);
   const modelDir = await createModel({
     name: opts.name,
     purpose: opts.purpose,

@@ -117,7 +117,7 @@ export function register(server: McpServer): void {
           connectorKind = JSON.parse(raw).connector_kind;
         } catch { /* will be caught by buildModelWithClarification */ }
 
-        if (connectorKind !== "postgres" && !billingProject) {
+        if (connectorKind === "bigquery" && !billingProject) {
           throw new McpError(
             ErrorCode.InvalidParams,
             "billing_project is required for BigQuery substrates (set via parameter or BQ_PROJECT_ID env var). " +

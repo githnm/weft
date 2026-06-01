@@ -6,8 +6,12 @@ import {
   Check,
   ChevronRight,
   Loader2,
+  MoreHorizontal,
   Plus,
+  Search,
   Sparkles,
+  Trash2,
+  X,
 } from "lucide-react";
 
 import { cn } from "@/lib/utils";
@@ -18,17 +22,27 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { MalloyBlock } from "@/components/malloy-block";
 import { VerificationCallout } from "@/components/verification-callout";
+import { DeleteModelDialog } from "@/components/delete-model-dialog";
+import { ModelEditor } from "./model-editor";
 import {
+  addDefinition,
   designBuild,
   designPlan,
   fetchHealth,
-  fetchModelDetail,
   fetchModels,
   type BuildOutcome,
+  type DefinitionOutcome,
   type DesignPlan,
-  type ModelDetail,
   type ModelInfo,
 } from "@/lib/api";
+
+/** Parse a comma/space-separated aliases input into a clean list. */
+function parseAliases(raw: string): string[] {
+  return raw
+    .split(/[,\n]/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
 
 type Mode = { kind: "view" } | { kind: "detail"; name: string } | { kind: "design" };
 
@@ -37,6 +51,8 @@ export function ModelsScreen() {
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
 
   const refresh = () => {
     setLoading(true);
@@ -47,6 +63,12 @@ export function ModelsScreen() {
   };
 
   useEffect(refresh, []);
+
+  // Brief, auto-dismissing confirmation after a delete.
+  const flash = (msg: string) => {
+    setNotice(msg);
+    window.setTimeout(() => setNotice((cur) => (cur === msg ? null : cur)), 4000);
+  };
 
   if (mode.kind === "design") {
     return (
@@ -61,14 +83,25 @@ export function ModelsScreen() {
   }
 
   if (mode.kind === "detail") {
-    return <ModelDetailView name={mode.name} onBack={() => setMode({ kind: "view" })} />;
+    return (
+      <ModelEditor
+        name={mode.name}
+        onBack={() => setMode({ kind: "view" })}
+        onDeleted={(name) => {
+          setModels((prev) => prev.filter((m) => m.name !== name));
+          flash(`Deleted “${name}”.`);
+          setMode({ kind: "view" });
+          refresh();
+        }}
+      />
+    );
   }
 
   return (
     <div className="mx-auto flex max-w-4xl flex-col gap-6 px-8 py-8">
       <div className="flex items-center justify-between">
         <div className="flex flex-col gap-1">
-          <h1 className="text-base font-medium tracking-tight">Models</h1>
+          <h1 className="text-lg font-normal tracking-tight">Models</h1>
           <p className="text-sm text-muted-foreground">
             Purpose-built semantic models scoped over your warehouse.
           </p>
@@ -78,6 +111,13 @@ export function ModelsScreen() {
           Design new model
         </Button>
       </div>
+
+      {notice && (
+        <div className="flex items-center gap-2 rounded-md border border-border bg-muted/50 px-3.5 py-2.5 text-sm text-muted-foreground">
+          <Check className="size-3.5 text-success" strokeWidth={2.5} />
+          {notice}
+        </div>
+      )}
 
       {loading && <Loading label="Loading models…" />}
       {error && !loading && (
@@ -100,7 +140,10 @@ export function ModelsScreen() {
                     <Boxes className="size-3.5 text-muted-foreground" strokeWidth={1.75} />
                     {m.name}
                   </CardTitle>
-                  {m.connector && <Badge variant="outline">{m.connector}</Badge>}
+                  <div className="flex items-center gap-1.5">
+                    {m.connector && <Badge variant="outline">{m.connector}</Badge>}
+                    <CardActions name={m.name} onRequestDelete={() => setDeleteTarget(m.name)} />
+                  </div>
                 </div>
                 <CardDescription>{m.purpose}</CardDescription>
               </CardHeader>
@@ -124,119 +167,71 @@ export function ModelsScreen() {
           </button>
         </div>
       )}
+
+      <DeleteModelDialog
+        name={deleteTarget}
+        open={deleteTarget !== null}
+        onOpenChange={(o) => !o && setDeleteTarget(null)}
+        onDeleted={(name) => {
+          setDeleteTarget(null);
+          setModels((prev) => prev.filter((m) => m.name !== name));
+          flash(`Deleted “${name}”.`);
+        }}
+      />
     </div>
   );
 }
 
-// ── Detail view ──────────────────────────────────────────────────
+// ── Delete affordances ───────────────────────────────────────────
 
-function ModelDetailView({ name, onBack }: { name: string; onBack: () => void }) {
-  const [detail, setDetail] = useState<ModelDetail | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    setDetail(null);
-    setError(null);
-    fetchModelDetail(name)
-      .then(setDetail)
-      .catch((e) => setError(e instanceof Error ? e.message : String(e)));
-  }, [name]);
-
+// Subtle per-card actions menu (•••). Stops click propagation so it never
+// triggers the card's open-detail handler. One destructive item, muted red.
+function CardActions({ name, onRequestDelete }: { name: string; onRequestDelete: () => void }) {
+  const [open, setOpen] = useState(false);
   return (
-    <div className="mx-auto flex max-w-3xl flex-col gap-6 px-8 py-8">
+    <div className="relative" onClick={(e) => e.stopPropagation()}>
       <button
-        onClick={onBack}
-        className="flex items-center gap-1.5 self-start text-sm text-muted-foreground transition-colors hover:text-foreground"
+        aria-label={`Actions for ${name}`}
+        onClick={(e) => {
+          e.stopPropagation();
+          setOpen((v) => !v);
+        }}
+        className="flex size-6 items-center justify-center rounded-md text-muted-foreground/50 transition-colors hover:bg-muted hover:text-foreground"
       >
-        <ArrowLeft className="size-3.5" />
-        Models
+        <MoreHorizontal className="size-4" />
       </button>
-
-      {!detail && !error && <Loading label="Loading model…" />}
-      {error && (
-        <div className="rounded-md border border-border bg-muted/50 px-3.5 py-3 text-sm text-muted-foreground">
-          {error}
-        </div>
-      )}
-
-      {detail && (
+      {open && (
         <>
-          <div className="flex flex-col gap-1">
-            <div className="flex items-center gap-2">
-              <h1 className="font-mono text-base font-medium tracking-tight">{detail.name}</h1>
-              {detail.connector && <Badge variant="outline">{detail.connector}</Badge>}
-            </div>
-            <p className="text-sm text-muted-foreground">{detail.purpose}</p>
+          {/* Click-away backdrop */}
+          <div
+            className="fixed inset-0 z-10"
+            onClick={(e) => {
+              e.stopPropagation();
+              setOpen(false);
+            }}
+          />
+          <div className="absolute right-0 z-20 mt-1 w-36 overflow-hidden rounded-md border border-border bg-popover py-1 shadow-popover">
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                setOpen(false);
+                onRequestDelete();
+              }}
+              className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm text-destructive transition-colors hover:bg-destructive-subtle"
+            >
+              <Trash2 className="size-3.5" />
+              Delete
+            </button>
           </div>
-
-          <FieldList title="Measures" items={detail.measures} />
-          <FieldList title="Dimensions" items={detail.dimensions} />
-
-          {detail.views.length > 0 && (
-            <Card>
-              <CardHeader className="border-b border-border py-2.5">
-                <CardTitle className="text-muted-foreground">Views</CardTitle>
-              </CardHeader>
-              <CardContent className="flex flex-wrap gap-2 pt-3">
-                {detail.views.map((v) => (
-                  <Badge key={v} variant="default" className="font-mono">
-                    {v}
-                  </Badge>
-                ))}
-              </CardContent>
-            </Card>
-          )}
-
-          {detail.decisions.length > 0 && (
-            <Card>
-              <CardHeader className="border-b border-border py-2.5">
-                <CardTitle className="text-muted-foreground">Decisions that built this</CardTitle>
-              </CardHeader>
-              <CardContent className="flex flex-col gap-0 p-0">
-                {detail.decisions.map((d) => (
-                  <div
-                    key={d.decision_id}
-                    className="flex items-center justify-between border-b border-border px-4 py-2 text-sm last:border-0"
-                  >
-                    <span className="font-mono text-xs text-muted-foreground">{d.decision_id}</span>
-                    <span className="text-foreground">{d.chosen}</span>
-                  </div>
-                ))}
-              </CardContent>
-            </Card>
-          )}
-
-          <MalloyBlock code={detail.malloy} label="model.malloy" />
         </>
       )}
     </div>
   );
 }
 
-function FieldList({ title, items }: { title: string; items: { name: string; expr: string }[] }) {
-  if (items.length === 0) return null;
-  return (
-    <Card>
-      <CardHeader className="border-b border-border py-2.5">
-        <CardTitle className="text-muted-foreground">
-          {title} <span className="text-muted-foreground/60">({items.length})</span>
-        </CardTitle>
-      </CardHeader>
-      <CardContent className="flex flex-col gap-0 p-0">
-        {items.map((it) => (
-          <div key={it.name} className="flex flex-col gap-0.5 border-b border-border px-4 py-2.5 last:border-0">
-            <span className="font-mono text-sm text-foreground">{it.name}</span>
-            <span className="font-mono text-xs text-muted-foreground">{it.expr}</span>
-          </div>
-        ))}
-      </CardContent>
-    </Card>
-  );
-}
-
 // ── Design wizard ────────────────────────────────────────────────
 
-type Step = "form" | "plan" | "decisions" | "building" | "result";
+type Step = "form" | "plan" | "decisions" | "definitions" | "building" | "result";
 
 function DesignWizard({
   onCancel,
@@ -265,7 +260,14 @@ function DesignWizard({
   // Step 1–2
   const [plan, setPlan] = useState<DesignPlan | null>(null);
   const [selectedTables, setSelectedTables] = useState<Set<string>>(new Set());
+  const [tableSearch, setTableSearch] = useState("");
   const [choices, setChoices] = useState<Record<string, string>>({});
+
+  // Step 2.5 — open custom definitions (baked into the model, with aliases)
+  const [definitions, setDefinitions] = useState<{ text: string; aliases: string }[]>([]);
+  const [defInput, setDefInput] = useState("");
+  const [defAliasInput, setDefAliasInput] = useState("");
+  const [bakedConcepts, setBakedConcepts] = useState<DefinitionOutcome[]>([]);
 
   // Step 3
   const [outcome, setOutcome] = useState<BuildOutcome | null>(null);
@@ -291,7 +293,14 @@ function DesignWizard({
         setPlan(p);
         // Pin the resolved substrate path so the build step uses the SAME dir.
         setSubstrateDir(p.substrateDir);
-        setSelectedTables(new Set(p.relevantTables.map((t) => t.name)));
+        setSelectedTables(
+          new Set(
+            (p.allTables.length ? p.allTables.filter((t) => t.proposed) : p.relevantTables).map(
+              (t) => t.name,
+            ),
+          ),
+        );
+        setTableSearch("");
         const initial: Record<string, string> = {};
         for (const d of p.decisions) {
           const rec = d.options.find((o) => o.recommended) ?? d.options[0];
@@ -304,7 +313,7 @@ function DesignWizard({
       .finally(() => setBusy(false));
   };
 
-  const runBuild = (extraClarification?: { question: string; answer: string }[]) => {
+  const runBuild = async (extraClarification?: { question: string; answer: string }[]) => {
     if (!plan) return;
     setStep("building");
     setError(null);
@@ -312,25 +321,44 @@ function DesignWizard({
     const resolved = plan.decisions
       .filter((d) => choices[d.id])
       .map((d) => ({ decision_id: d.id, chosen: choices[d.id] }));
-    const relevant = plan.relevantTables.filter((t) => selectedTables.has(t.name));
+    const relevant = (
+      plan.allTables.length
+        ? plan.allTables.map((t) => ({ name: t.name, reason: t.reason }))
+        : plan.relevantTables
+    ).filter((t) => selectedTables.has(t.name));
 
-    designBuild({
-      name: name.trim(),
-      purpose: purpose.trim(),
-      resolved_decisions: resolved,
-      relevant_tables: relevant,
-      substrate_dir: substrateDir.trim() || undefined,
-      clarifications: allClarifications.length ? allClarifications : undefined,
-    })
-      .then((res) => {
-        setOutcome(res);
-        setClarifications(allClarifications);
-        setStep("result");
-      })
-      .catch((e) => {
-        setError(e instanceof Error ? e.message : String(e));
-        setStep("result");
+    try {
+      // Build the structural model first (decisions + tables).
+      const res = await designBuild({
+        name: name.trim(),
+        purpose: purpose.trim(),
+        resolved_decisions: resolved,
+        relevant_tables: relevant,
+        substrate_dir: substrateDir.trim() || undefined,
+        clarifications: allClarifications.length ? allClarifications : undefined,
       });
+      setClarifications(allClarifications);
+
+      // Bake definitions only once we have a WRITTEN model (not a clarification
+      // pause). Each is recorded as a concept with its explicit aliases.
+      if (!res.clarificationsNeeded?.length && definitions.length > 0) {
+        const applied: DefinitionOutcome[] = [];
+        for (const d of definitions) {
+          try {
+            applied.push(await addDefinition(name.trim(), d.text, parseAliases(d.aliases)));
+          } catch {
+            /* best-effort — one bad definition shouldn't lose the rest */
+          }
+        }
+        setBakedConcepts(applied);
+      }
+
+      setOutcome(res);
+      setStep("result");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setStep("result");
+    }
   };
 
   const submitClarifications = () => {
@@ -410,54 +438,125 @@ function DesignWizard({
       )}
 
       {/* Step 1 — plan / table selection */}
-      {step === "plan" && plan && (
-        <div className="flex flex-col gap-4">
-          <p className="text-sm text-muted-foreground">{plan.tableSelectionReasoning}</p>
-          <div className="flex flex-col gap-2">
-            <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-              Relevant tables · {plan.excludedCount} others excluded
-            </span>
-            {plan.relevantTables.map((t) => {
-              const on = selectedTables.has(t.name);
-              return (
-                <button
-                  key={t.name}
-                  onClick={() =>
-                    setSelectedTables((prev) => {
-                      const next = new Set(prev);
-                      next.has(t.name) ? next.delete(t.name) : next.add(t.name);
-                      return next;
-                    })
-                  }
-                  className={cn(
-                    "flex items-start gap-3 rounded-md border px-3 py-2.5 text-left transition-colors",
-                    on ? "border-primary bg-primary/5" : "border-border hover:bg-muted",
-                  )}
-                >
-                  <span
-                    className={cn(
-                      "mt-0.5 flex size-4 shrink-0 items-center justify-center rounded-[4px] border",
-                      on ? "border-primary bg-primary text-primary-foreground" : "border-border",
-                    )}
-                  >
-                    {on && <Check className="size-3" strokeWidth={2.5} />}
-                  </span>
-                  <span className="flex flex-col gap-0.5">
-                    <span className="font-mono text-sm text-foreground">{t.name}</span>
-                    <span className="text-xs text-muted-foreground">{t.reason}</span>
-                  </span>
-                </button>
-              );
-            })}
+      {step === "plan" && plan && (() => {
+        const all =
+          plan.allTables.length > 0
+            ? plan.allTables
+            : plan.relevantTables.map((t) => ({
+                name: t.name,
+                rowCount: 0,
+                columnCount: 0,
+                proposed: true,
+                reason: t.reason,
+              }));
+        const toggle = (nameOf: string) =>
+          setSelectedTables((prev) => {
+            const next = new Set(prev);
+            if (next.has(nameOf)) next.delete(nameOf);
+            else next.add(nameOf);
+            return next;
+          });
+        const selected = all.filter((t) => selectedTables.has(t.name));
+        const other = all.filter((t) => !selectedTables.has(t.name));
+        const q = tableSearch.trim().toLowerCase();
+        const otherShown = q ? other.filter((t) => t.name.toLowerCase().includes(q)) : other;
+
+        const Row = (t: (typeof all)[number]) => {
+          const on = selectedTables.has(t.name);
+          const meta = `${t.rowCount.toLocaleString()} rows · ${t.columnCount} cols`;
+          return (
+            <button
+              key={t.name}
+              onClick={() => toggle(t.name)}
+              className={cn(
+                "flex items-start gap-3 rounded-md border px-3 py-2.5 text-left transition-colors",
+                on ? "border-foreground/40 bg-muted" : "border-border hover:bg-muted",
+              )}
+            >
+              <span
+                className={cn(
+                  "mt-0.5 flex size-4 shrink-0 items-center justify-center rounded-[4px] border",
+                  on ? "border-foreground bg-foreground text-background" : "border-border",
+                )}
+              >
+                {on && <Check className="size-3" strokeWidth={2.5} />}
+              </span>
+              <span className="flex min-w-0 flex-col gap-0.5">
+                <span className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+                  <span className="font-mono text-sm text-foreground">{t.name}</span>
+                  {t.rowCount > 0 || t.columnCount > 0 ? (
+                    <span className="font-mono text-[11px] text-muted-foreground">{meta}</span>
+                  ) : null}
+                </span>
+                {t.reason && <span className="text-xs text-muted-foreground">{t.reason}</span>}
+              </span>
+            </button>
+          );
+        };
+
+        return (
+          <div className="flex flex-col gap-5">
+            <div className="flex items-start justify-between gap-4">
+              <p className="text-sm text-muted-foreground">{plan.tableSelectionReasoning}</p>
+              <span className="shrink-0 whitespace-nowrap rounded-full border border-border px-2.5 py-1 text-xs text-muted-foreground">
+                {selectedTables.size} selected
+              </span>
+            </div>
+
+            {/* Section 1 — selected */}
+            <div className="flex flex-col gap-2">
+              <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                Selected tables ({selected.length})
+              </span>
+              {selected.length > 0 ? (
+                selected.map(Row)
+              ) : (
+                <p className="rounded-md border border-dashed border-border px-3 py-4 text-sm text-muted-foreground">
+                  No tables selected. Pick at least one from below.
+                </p>
+              )}
+            </div>
+
+            {/* divider */}
+            <div className="h-px bg-border" />
+
+            {/* Section 2 — everything else */}
+            <div className="flex flex-col gap-2">
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                  Other tables ({other.length})
+                </span>
+              </div>
+              {other.length > 0 && (
+                <div className="relative">
+                  <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+                  <Input
+                    value={tableSearch}
+                    onChange={(e) => setTableSearch(e.target.value)}
+                    placeholder="Filter tables by name…"
+                    className="pl-8"
+                  />
+                </div>
+              )}
+              {otherShown.length > 0 ? (
+                otherShown.map(Row)
+              ) : (
+                <p className="px-1 py-2 text-xs text-muted-foreground">
+                  {other.length === 0 ? "All tables are selected." : `No tables match "${tableSearch}".`}
+                </p>
+              )}
+            </div>
+
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-muted-foreground">{selectedTables.size} tables selected</span>
+              <Button onClick={() => setStep("decisions")} disabled={selectedTables.size === 0}>
+                Continue to decisions
+                <ChevronRight className="size-3.5" />
+              </Button>
+            </div>
           </div>
-          <div className="flex justify-end">
-            <Button onClick={() => setStep("decisions")} disabled={selectedTables.size === 0}>
-              Continue to decisions
-              <ChevronRight className="size-3.5" />
-            </Button>
-          </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* Step 2 — decisions (the centerpiece) */}
       {step === "decisions" && plan && (
@@ -480,16 +579,16 @@ function DesignWizard({
                       onClick={() => setChoices((prev) => ({ ...prev, [d.id]: o.label }))}
                       className={cn(
                         "flex items-start gap-3 rounded-md border px-3 py-2.5 text-left transition-colors",
-                        selected ? "border-primary bg-primary/5" : "border-border hover:bg-muted",
+                        selected ? "border-foreground/40 bg-muted" : "border-border hover:bg-muted",
                       )}
                     >
                       <span
                         className={cn(
                           "mt-0.5 flex size-4 shrink-0 items-center justify-center rounded-full border",
-                          selected ? "border-primary" : "border-border",
+                          selected ? "border-foreground" : "border-border",
                         )}
                       >
-                        {selected && <span className="size-2 rounded-full bg-primary" />}
+                        {selected && <span className="size-2 rounded-full bg-foreground" />}
                       </span>
                       <span className="flex flex-1 flex-col gap-0.5">
                         <span className="flex items-center gap-2">
@@ -509,7 +608,94 @@ function DesignWizard({
               <ArrowLeft className="size-3.5" />
               Back
             </Button>
-            <Button onClick={() => runBuild()}>Build model</Button>
+            <Button onClick={() => setStep("definitions")}>
+              Continue
+              <ChevronRight className="size-3.5" />
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {/* Step 2.5 — open custom definitions (the unbounded business meaning) */}
+      {step === "definitions" && (
+        <div className="flex flex-col gap-4">
+          <div className="flex flex-col gap-1">
+            <p className="text-sm text-muted-foreground">
+              Add business terms in your own words. Each is baked into the model — so a question that
+              uses the term (or any alias you list) applies it automatically. Aliases are explicit:
+              nothing is guessed. Optional; add as many as you like, or none.
+            </p>
+          </div>
+
+          <div className="flex flex-col gap-2">
+            {definitions.map((d, i) => (
+              <div
+                key={i}
+                className="flex items-start gap-2 rounded-md border border-border bg-muted/30 px-3 py-2 text-sm"
+              >
+                <Sparkles className="mt-0.5 size-3.5 shrink-0 text-tertiary" strokeWidth={1.75} />
+                <span className="flex flex-1 flex-col gap-1">
+                  <span>{d.text}</span>
+                  {parseAliases(d.aliases).length > 0 && (
+                    <span className="flex flex-wrap items-center gap-1.5">
+                      <span className="text-xs text-muted-foreground">aka</span>
+                      {parseAliases(d.aliases).map((a) => (
+                        <Badge key={a} variant="outline">
+                          {a}
+                        </Badge>
+                      ))}
+                    </span>
+                  )}
+                </span>
+                <button
+                  onClick={() => setDefinitions((prev) => prev.filter((_, j) => j !== i))}
+                  className="text-muted-foreground transition-colors hover:text-foreground"
+                >
+                  <X className="size-3.5" />
+                </button>
+              </div>
+            ))}
+          </div>
+
+          <div className="flex flex-col gap-2 rounded-md border border-border p-2.5">
+            <Input
+              value={defInput}
+              onChange={(e) => setDefInput(e.target.value)}
+              placeholder="customers = exclude internal accounts and test workspaces"
+            />
+            <div className="flex items-center gap-2">
+              <Input
+                value={defAliasInput}
+                onChange={(e) => setDefAliasInput(e.target.value)}
+                placeholder="also called (optional, comma-separated): users, accounts"
+                className="font-mono"
+              />
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  if (defInput.trim()) {
+                    setDefinitions((prev) => [...prev, { text: defInput.trim(), aliases: defAliasInput.trim() }]);
+                    setDefInput("");
+                    setDefAliasInput("");
+                  }
+                }}
+                disabled={!defInput.trim()}
+              >
+                <Plus className="size-3.5" />
+                Add
+              </Button>
+            </div>
+          </div>
+
+          <div className="flex items-center justify-between">
+            <Button variant="ghost" size="sm" onClick={() => setStep("decisions")}>
+              <ArrowLeft className="size-3.5" />
+              Back
+            </Button>
+            <Button onClick={() => runBuild()}>
+              Build model{definitions.length > 0 ? ` (+${definitions.length} definitions)` : ""}
+            </Button>
           </div>
         </div>
       )}
@@ -535,6 +721,7 @@ function DesignWizard({
         <ResultView
           error={error}
           outcome={outcome}
+          bakedConcepts={bakedConcepts}
           clarifyChoices={clarifyChoices}
           setClarifyChoices={setClarifyChoices}
           clarifyRound={clarifyRound}
@@ -550,6 +737,7 @@ function DesignWizard({
 function ResultView({
   error,
   outcome,
+  bakedConcepts,
   clarifyChoices,
   setClarifyChoices,
   clarifyRound,
@@ -559,6 +747,7 @@ function ResultView({
 }: {
   error: string | null;
   outcome: BuildOutcome | null;
+  bakedConcepts: DefinitionOutcome[];
   clarifyChoices: Record<string, string>;
   setClarifyChoices: Dispatch<SetStateAction<Record<string, string>>>;
   clarifyRound: number;
@@ -604,16 +793,16 @@ function ResultView({
                     onClick={() => setClarifyChoices((prev) => ({ ...prev, [q.id]: opt }))}
                     className={cn(
                       "flex items-start gap-3 rounded-md border px-3 py-2.5 text-left text-sm transition-colors",
-                      selected ? "border-primary bg-primary/5" : "border-border hover:bg-muted",
+                      selected ? "border-foreground/40 bg-muted" : "border-border hover:bg-muted",
                     )}
                   >
                     <span
                       className={cn(
                         "mt-0.5 flex size-4 shrink-0 items-center justify-center rounded-full border",
-                        selected ? "border-primary" : "border-border",
+                        selected ? "border-foreground" : "border-border",
                       )}
                     >
-                      {selected && <span className="size-2 rounded-full bg-primary" />}
+                      {selected && <span className="size-2 rounded-full bg-foreground" />}
                     </span>
                     {opt}
                   </button>
@@ -644,6 +833,31 @@ function ResultView({
           {outcome.measuresCount} measures · {outcome.dimensionsCount} dimensions. The model was saved
           but is incomplete — review below before relying on it.
         </VerificationCallout>
+      )}
+
+      {bakedConcepts.some((c) => c.applied) && (
+        <Card>
+          <CardHeader className="border-b border-border py-2.5">
+            <CardTitle className="text-muted-foreground">Definitions baked in</CardTitle>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-0 p-0">
+            {bakedConcepts
+              .filter((c) => c.applied && c.concept)
+              .map((c) => (
+                <div key={c.concept!.canonical_name} className="flex flex-col gap-1 border-b border-border px-4 py-2.5 last:border-0">
+                  <span className="font-mono text-sm text-foreground">{c.concept!.canonical_name}</span>
+                  <span className="flex flex-wrap items-center gap-1.5">
+                    <span className="font-mono text-xs text-muted-foreground">{c.concept!.field}</span>
+                    {c.concept!.aliases.map((a) => (
+                      <Badge key={a} variant="outline">
+                        {a}
+                      </Badge>
+                    ))}
+                  </span>
+                </div>
+              ))}
+          </CardContent>
+        </Card>
       )}
 
       {outcome.failedItems.length > 0 && (
@@ -714,9 +928,10 @@ function WizardHeader({ step }: { step: Step }) {
     { id: "form", label: "Purpose" },
     { id: "plan", label: "Tables" },
     { id: "decisions", label: "Decisions" },
+    { id: "definitions", label: "Definitions" },
     { id: "result", label: "Build" },
   ];
-  const order: Step[] = ["form", "plan", "decisions", "building", "result"];
+  const order: Step[] = ["form", "plan", "decisions", "definitions", "building", "result"];
   const current = order.indexOf(step);
   return (
     <div className="flex items-center gap-2">
@@ -735,7 +950,7 @@ function WizardHeader({ step }: { step: Step }) {
               <span
                 className={cn(
                   "flex size-5 items-center justify-center rounded-full border text-xs",
-                  active ? "border-primary text-primary" : done ? "border-primary bg-primary text-primary-foreground" : "border-border text-muted-foreground",
+                  active ? "border-foreground text-foreground" : done ? "border-foreground bg-foreground text-background" : "border-border text-muted-foreground",
                 )}
               >
                 {done ? <Check className="size-3" strokeWidth={2.5} /> : i + 1}

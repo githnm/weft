@@ -18,8 +18,10 @@ import type {
   FrequencyResult,
   ForeignKey,
   NormalizedType,
+  JsonValueType,
   BigQueryConnectorConfig,
 } from "./types.js";
+import { getJsonExtractExpression } from "./types.js";
 
 // ── Constants ─────────────────────────────────────────────────
 
@@ -32,9 +34,11 @@ const DISTINCT_VALUE_LIMIT = 100;
 /** Top-N values to capture by frequency */
 const TOP_N_FREQUENCY = 30;
 
-// BQ types that should be skipped (complex/unsupported)
+// BQ types that should be skipped (complex/unsupported).
+// NOTE: JSON is deliberately NOT skipped — it is sampled so its common keys
+// can be exposed as dimensions (see isJsonType / inferJsonKeys).
 const SKIPPED_TYPE_PREFIXES = [
-  "STRUCT", "RECORD", "ARRAY", "JSON", "GEOGRAPHY",
+  "STRUCT", "RECORD", "ARRAY", "GEOGRAPHY",
   "BIGNUMERIC", "INTERVAL", "RANGE",
 ];
 
@@ -335,6 +339,9 @@ export class BigQueryConnector implements Connector {
     // Boolean
     if (upper === "BOOL" || upper === "BOOLEAN") return "boolean";
 
+    // JSON document type — sampled for key discovery, not skipped
+    if (upper === "JSON") return "json";
+
     return "unsupported";
   }
 
@@ -346,14 +353,24 @@ export class BigQueryConnector implements Connector {
     return false;
   }
 
+  isJsonType(rawType: string): boolean {
+    return rawType.toUpperCase() === "JSON";
+  }
+
+  // ── JSON key extraction ─────────────────────────────────────
+
+  jsonExtractExpression(column: string, path: string[], valueType: JsonValueType, nativeType?: string): string {
+    return getJsonExtractExpression("bigquery", column, path, valueType, nativeType);
+  }
+
   // ── Aggregate safety ────────────────────────────────────────
 
   aggregateSafeExpression(columnName: string, nativeType: string): string | null {
     // BigQuery types map cleanly to Malloy's legal aggregate types.
-    // If the type is skipped/unsupported, it's un-aggregatable.
+    // If the type is skipped/unsupported/JSON, it's un-aggregatable as a whole.
     if (this.isSkippedType(nativeType)) return null;
     const normalized = this.normalizeType(nativeType);
-    if (normalized === "unsupported") return null;
+    if (normalized === "unsupported" || normalized === "json") return null;
     return columnName;
   }
 

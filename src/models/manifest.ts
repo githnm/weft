@@ -4,6 +4,27 @@ import type { DesignProvenance, RefinementRecord } from "../interview/types.js";
 
 // ── Types ────────────────────────────────────────────────────────
 
+/**
+ * A business concept baked into model.malloy, with explicit aliases.
+ *
+ * The filter/measure lives ONCE in model.malloy as `field`; this records the
+ * concept's vocabulary so the ask pipeline can apply it when a question uses
+ * the canonical name OR any owner-confirmed alias. No alias is ever added
+ * without explicit confirmation — a wrong alias is a silent wrong answer.
+ */
+export interface ConceptDefinition {
+  /** Primary name, e.g. "external_users". */
+  canonical_name: string;
+  /** Words that also refer to this concept — explicit, owner-confirmed only. */
+  aliases: string[];
+  /** The baked field in model.malloy this concept resolves to. */
+  field: string;
+  /** "dimension" → filter `where: <field>`; "measure" → aggregate `<field>`. */
+  kind: "dimension" | "measure";
+  /** Human-readable expression, for provenance + the generator prompt. */
+  filter?: string;
+}
+
 export interface ModelManifest {
   /** Human-readable model name (also the directory name) */
   name: string;
@@ -21,6 +42,8 @@ export interface ModelManifest {
   design?: DesignProvenance;
   /** History of refinements applied to this model */
   refinement_history?: RefinementRecord[];
+  /** Baked business concepts + their explicit aliases (definition provenance). */
+  concepts?: ConceptDefinition[];
 }
 
 const MANIFEST_FILE = "model.json";

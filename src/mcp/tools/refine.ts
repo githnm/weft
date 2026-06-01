@@ -47,7 +47,7 @@ export function register(server: McpServer): void {
           }
         } catch { /* will be caught by refineModel */ }
 
-        if (connectorKind !== "postgres" && !billingProject) {
+        if (connectorKind === "bigquery" && !billingProject) {
           throw new McpError(
             ErrorCode.InvalidParams,
             "billing_project is required for BigQuery models (set via parameter or BQ_PROJECT_ID env var). " +

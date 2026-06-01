@@ -12,9 +12,9 @@ import path from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { Runtime } from "@malloydata/malloy";
 import type { ConnectorKind } from "../connectors/types.js";
-import { getAggregateSafeExpression } from "../connectors/types.js";
+import { getAggregateSafeExpression, getJsonExtractExpression } from "../connectors/types.js";
 import { buildMalloyConnection } from "../connectors/malloy-connection.js";
-import type { InspectionResult } from "../introspect/types.js";
+import type { InspectionResult, JsonKeyInfo } from "../introspect/types.js";
 import type { LLMUsage } from "../llm/anthropic.js";
 
 // ── Compile timeout ─────────────────────────────────────────────
@@ -27,6 +27,63 @@ import type { LLMUsage } from "../llm/anthropic.js";
  * over typical cloud Postgres latencies.
  */
 export const COMPILE_TIMEOUT_MS = 60_000;
+
+// ── JSON key rendering for the table catalog ────────────────────
+
+/** Only JSON keys present in ≥ this fraction of sampled docs are proposable. */
+const JSON_KEY_THRESHOLD = 0.05;
+
+/** Suggest a Malloy dimension name from a JSON key path ("geo.country" → "geo_country"). */
+function jsonDimName(path: string): string {
+  return path.replace(/[^A-Za-z0-9]+/g, "_").replace(/^_+|_+$/g, "").toLowerCase();
+}
+
+/**
+ * Render a JSON/JSONB column's discovered keys as catalog guidance: the
+ * proposable scalar keys (≥ threshold) each with a ready-to-use, connector-aware
+ * extraction expression, and the remaining keys flagged as available but not
+ * auto-exposed (arrays need unnest; deep nesting / rare keys aren't proposed).
+ */
+function renderJsonKeys(
+  connectorKind: ConnectorKind | undefined,
+  columnName: string,
+  nativeType: string,
+  keys: JsonKeyInfo[],
+  sampledRows: number | undefined,
+): string[] {
+  const lines: string[] = [];
+  const pct = (f: number) => `${Math.round(f * 100)}%`;
+
+  const proposable = keys.filter((k) => k.kind === "scalar" && k.frequency >= JSON_KEY_THRESHOLD);
+  const notExposed = keys.filter((k) => !(k.kind === "scalar" && k.frequency >= JSON_KEY_THRESHOLD));
+
+  const sampleNote = sampledRows ? `${sampledRows} docs sampled` : "sampled";
+  lines.push(`      ↳ JSON column (${sampleNote}). Discovered keys:`);
+
+  if (proposable.length > 0) {
+    lines.push(`        proposable dimensions (≥${Math.round(JSON_KEY_THRESHOLD * 100)}% of docs) — use the exact extraction expression:`);
+    for (const k of proposable.slice(0, 20)) {
+      const vt = k.value_type ?? "string";
+      const expr = getJsonExtractExpression(connectorKind, columnName, k.path.split("."), vt, nativeType);
+      const mixed = k.mixed_types ? ", mixed→string" : "";
+      lines.push(`          • ${k.path} (${vt}${mixed}, ${pct(k.frequency)}) → dimension: ${jsonDimName(k.path)} is ${expr}`);
+    }
+  } else {
+    lines.push(`        (no scalar key reached the ${Math.round(JSON_KEY_THRESHOLD * 100)}% threshold — do not invent dimensions for this column)`);
+  }
+
+  if (notExposed.length > 0) {
+    const notes = notExposed.slice(0, 12).map((k) => {
+      if (k.kind === "array") return `${k.path} (array — needs unnest)`;
+      if (k.kind === "deep") return `${k.path} (deeply nested)`;
+      if (k.kind === "nested-object") return `${k.path} (object — scalar sub-keys listed individually)`;
+      return `${k.path} (${pct(k.frequency)} — below threshold)`;
+    });
+    lines.push(`        available but NOT auto-exposed: ${notes.join("; ")}`);
+  }
+
+  return lines;
+}
 
 // ── Table catalog builder ───────────────────────────────────────
 
@@ -63,10 +120,18 @@ export function buildTableCatalog(
       const safeExpr = getAggregateSafeExpression(connKind, col.name, col.type);
       if (safeExpr && safeExpr !== col.name) {
         desc += ` [aggregate as: ${safeExpr}]`;
-      } else if (safeExpr === null) {
+      } else if (safeExpr === null && !(col.json_keys && col.json_keys.length > 0)) {
         desc += ` [not aggregatable]`;
       }
       lines.push(desc);
+
+      // JSON/JSONB column: surface discovered keys + extraction expressions so
+      // the model can expose them as connector-aware dimensions.
+      if (col.json_keys && col.json_keys.length > 0) {
+        for (const l of renderJsonKeys(connKind, col.name, col.type, col.json_keys, col.json_sampled_rows)) {
+          lines.push(l);
+        }
+      }
     }
 
     lines.push("");

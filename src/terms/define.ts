@@ -14,6 +14,28 @@ import { extractSourceSummary } from "../agent/catalog.js";
 import { loadMetadata, getSourceMetadata } from "../agent/metadata-loader.js";
 import { captureTermDefineTrace } from "../context/instrument.js";
 
+// ── Shared: default source file for a directory ───────────────────
+
+/**
+ * Pick the source .malloy file to attach a term to. For a semantic model the
+ * queryable source is its `model.malloy` (the built, self-contained model that
+ * `ask` selects) — prefer it so the term validates against, and is tagged to,
+ * the same source `ask` uses. Otherwise (a substrate dir) fall back to the
+ * first file with a parseable source. Returns null if none parse.
+ */
+export async function resolveSourceFilename(modelsDir: string): Promise<string | null> {
+  const entries = await fs.readdir(modelsDir).catch(() => [] as string[]);
+  const malloyFiles = entries.filter((f) => f.endsWith(".malloy"));
+  const ordered = malloyFiles.includes("model.malloy")
+    ? ["model.malloy", ...malloyFiles.filter((f) => f !== "model.malloy").sort()]
+    : malloyFiles.sort();
+  for (const f of ordered) {
+    const content = await fs.readFile(path.join(modelsDir, f), "utf-8").catch(() => "");
+    if (content && extractSourceSummary(f, content)) return f;
+  }
+  return null;
+}
+
 // ── Shared: compile-validate a filter ─────────────────────────────
 
 /**

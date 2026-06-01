@@ -32,7 +32,7 @@ export function registerAllTools(server: McpServer): void {
   registerSuggest(server);      // suggest_metrics
   registerAsk(server);          // ask_question
   registerCorrect(server);      // correct_answer
-  registerDefine(server);       // define_term
+  registerDefine(server);       // define_term, add_definition
   registerTerms(server);        // list_terms, delete_term
   registerSession(server);      // show_session, clear_session
   registerCorrections(server);  // list_corrections, rollback_correction

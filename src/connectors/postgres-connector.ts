@@ -19,8 +19,10 @@ import type {
   FrequencyResult,
   ForeignKey,
   NormalizedType,
+  JsonValueType,
   PostgresConnectorConfig,
 } from "./types.js";
+import { getJsonExtractExpression } from "./types.js";
 
 const { Pool } = pg;
 
@@ -35,9 +37,11 @@ const DISTINCT_VALUE_LIMIT = 100;
 /** Top-N values to capture by frequency */
 const TOP_N_FREQUENCY = 30;
 
-// PG types that should be skipped (complex/unsupported)
+// PG types that should be skipped (complex/unsupported).
+// NOTE: json/jsonb are deliberately NOT skipped — they are sampled so their
+// common keys can be exposed as dimensions (see isJsonType / inferJsonKeys).
 const SKIPPED_TYPES = new Set([
-  "json", "jsonb", "xml", "bytea", "tsvector", "tsquery",
+  "xml", "bytea", "tsvector", "tsquery",
   "point", "line", "lseg", "box", "path", "polygon", "circle",
   "inet", "cidr", "macaddr", "macaddr8",
   "bit", "bit varying", "varbit",
@@ -156,6 +160,10 @@ const PG_TYPE_MAP: Record<string, NormalizedType> = {
   // Boolean
   "boolean": "boolean",
   "bool": "boolean",
+
+  // JSON document types — sampled for key discovery, not skipped
+  "json": "json",
+  "jsonb": "json",
 
   // Time types
   "timestamp without time zone": "timestamp",
@@ -539,6 +547,17 @@ export class PostgresConnector implements Connector {
     return false;
   }
 
+  isJsonType(rawType: string): boolean {
+    const lower = rawType.toLowerCase();
+    return lower === "json" || lower === "jsonb";
+  }
+
+  // ── JSON key extraction ─────────────────────────────────────
+
+  jsonExtractExpression(column: string, path: string[], valueType: JsonValueType, nativeType?: string): string {
+    return getJsonExtractExpression("postgres", column, path, valueType, nativeType);
+  }
+
   // ── Aggregate safety ────────────────────────────────────────
 
   aggregateSafeExpression(columnName: string, nativeType: string): string | null {
@@ -550,9 +569,10 @@ export class PostgresConnector implements Connector {
     // UUID needs ::string cast for Malloy aggregates
     if (lower === "uuid") return `${columnName}::string`;
 
-    // Check if normalized type is unsupported
+    // Check if normalized type is unsupported / a JSON document (the column
+    // as a whole is not aggregatable; its keys are exposed as dimensions)
     const normalized = this.normalizeType(nativeType);
-    if (normalized === "unsupported") return null;
+    if (normalized === "unsupported" || normalized === "json") return null;
 
     return columnName;
   }

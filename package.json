@@ -17,21 +17,28 @@
     "mcp": "tsc && node dist/mcp/server.js",
     "web": "tsc && pnpm --dir web build && node dist/web/server.js",
     "web:api": "tsc && node dist/web/server.js",
-    "test:syntax": "npx tsx scripts/test-malloy-forms.ts"
+    "test:syntax": "npx tsx scripts/test-malloy-forms.ts",
+    "test:json": "npx tsx scripts/test-json-keys.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "0.99.0",
+    "@duckdb/node-api": "1.4.4-r.1",
     "@fastify/static": "^7.0.4",
     "@google-cloud/bigquery": "7.9.1",
     "@malloydata/db-bigquery": "0.0.400",
+    "@malloydata/db-duckdb": "0.0.400",
+    "@malloydata/db-mysql": "0.0.400",
     "@malloydata/db-postgres": "^0.0.402",
+    "@malloydata/db-snowflake": "0.0.400",
     "@malloydata/malloy": "0.0.400",
     "@modelcontextprotocol/sdk": "1.29.0",
     "clipboardy": "4.0.0",
     "commander": "13.1.0",
     "dotenv": "16.4.7",
     "fastify": "^4.28.1",
+    "mysql2": "^3.22.4",
     "pg": "^8.21.0",
+    "snowflake-sdk": "^2.4.3",
     "zod": "3.25.28"
   },
   "devDependencies": {

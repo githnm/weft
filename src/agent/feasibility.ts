@@ -126,12 +126,15 @@ interface FeasibilityOptions {
   sourceMetadata?: SourceMetadata;
   /** Business terms that apply to this source (from terms.json) */
   sourceTerms?: TermsStore;
+  /** Baked concept → alias map (built by buildConceptsPrompt). Concept names +
+   *  aliases are answerable vocabulary. */
+  concepts?: string;
   /** Session context for follow-up questions */
   sessionContext?: SessionContext;
 }
 
 export async function checkFeasibility(options: FeasibilityOptions): Promise<FeasibilityResult> {
-  const { question, sourceContent, sourceName, importedFiles, sourceMetadata, sourceTerms, sessionContext } = options;
+  const { question, sourceContent, sourceName, importedFiles, sourceMetadata, sourceTerms, concepts, sessionContext } = options;
 
   // Build system prompt — add enum matching rules + metadata addendum if metadata is available
   let system = sourceMetadata
@@ -167,6 +170,14 @@ export async function checkFeasibility(options: FeasibilityOptions): Promise<Fea
       termLines.push(`- "${key}": filter = \`${term.filter}\` (${term.description})`);
     }
     userParts.push(termLines.join("\n"));
+  }
+
+  // Add baked concepts — their canonical names + aliases are answerable.
+  if (concepts) {
+    userParts.push(
+      concepts +
+        "\n\nA question that uses a concept name or any of its aliases IS feasible (the concept is defined in the model).",
+    );
   }
 
   // Add follow-up context if this is a continuation of a previous query

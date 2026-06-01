@@ -53,16 +53,27 @@ Return JSON only (no markdown fences, no commentary):
   "change_type": "add_measure" | "add_dimension" | "add_view" | "modify_measure" | "modify_filter" | "add_join" | "remove_join" | "change_grain" | "other",
   "target": "short description of what's being changed",
   "feasible": true/false,
+  "needs_clarification": true/false,
+  "clarification_question": "a specific, field-grounded question to ask the user — empty unless needs_clarification is true",
   "reasoning": "2-3 sentences explaining the classification and feasibility",
-  "missing": ["list of missing columns/tables if not feasible"]
+  "missing": ["list of missing columns/tables if genuinely impossible"]
 }
 
 RULES:
 - A refinement is feasible ONLY if the columns/tables it references exist in the model's current scope (its base tables and their columns).
-- If the user asks for a column that doesn't exist in any base table, mark NOT feasible and list what's missing.
 - change_grain is ALWAYS not feasible — it requires rebuilding the model. Return: "Changing grain requires rebuilding the model. Use the design flow to create a new model with the desired grain."
 - For add_join: the target table must exist in the substrate. If it does, it's feasible. Note the 3-join cap.
-- Be precise about what column/table names are needed.`;
+- Be precise about what column/table names are needed.
+
+UNDERSPECIFIED vs IMPOSSIBLE — this matters for definitions/segments ("exclude internal accounts", "active users", "power users", "churned"):
+- IMPOSSIBLE: there is NO field in scope that could express the concept. Set feasible=false, needs_clarification=false, and explain in reasoning + missing what field would be required.
+- UNDERSPECIFIED: the concept IS expressible with fields that DO exist (e.g. email, first_name/last_name, a domain in an email, created_at/timestamps, plan/status enums), but the request didn't say HOW to compute it (which domains count as internal? what threshold makes a user "active"?). DO NOT refuse. Set feasible=false AND needs_clarification=true, and write a clarification_question that:
+    * names the concrete fields available to express it (quote real column names from the catalog),
+    * proposes plausible ways to define it (e.g. email domain like '%@company.com', or matching specific names),
+    * asks the user to specify the criteria.
+  Example: request "exclude internal accounts" with an \`email\` and \`first_name\` column present →
+  needs_clarification=true, clarification_question="I can exclude internal accounts if you tell me how to identify them — by email domain (e.g. email ending in '@airbook.io' via the \`email\` field) or by specific names (\`first_name\`). What counts as internal?"
+- A request is feasible=true ONLY when it is BOTH groundable in real fields AND specified enough to write the expression now. If it's groundable but vague, prefer needs_clarification over feasible=true (don't invent arbitrary criteria).`;
 
 const REFINE_SYSTEM_PROMPT = `You are a senior analytics engineer editing an existing Malloy model. Given the CURRENT model.malloy, a TABLE CATALOG, and a REFINEMENT REQUEST, produce the FULL updated model.malloy.
 
@@ -73,6 +84,7 @@ ${MALLOY_SYNTAX_REFERENCE}
 EDITING RULES:
 - Return the COMPLETE updated model.malloy — not a diff, the full file.
 - Preserve ALL existing definitions unless the refinement specifically asks to change or remove them.
+- DEFINITIONS: if the refinement defines a business term or segment ("customers means exclude internal accounts", "active = at least 2 events"), BAKE it in as reusable vocabulary — a boolean dimension \`is_<concept>\` for a segment, or a measure for a metric — grounded in real columns. This makes it auto-apply to future questions that mention the concept. Do NOT merely add a one-off filter to a single measure.
 - The model must remain SELF-CONTAINED. No import statements. Keep existing connector table expressions.
 - HARD LIMIT: maximum 3 joins total. If adding a join would exceed 3, warn in a comment but do not add it.
 - HARD LIMIT: maximum 6 measures total. If adding a measure would exceed 6, warn in a comment but do not add it.
@@ -150,7 +162,7 @@ export async function refineModel(options: RefineModelOptions): Promise<Refineme
   const connectorKind = (manifest.connector_kind ?? inspection.connector_kind) as ConnectorKind | undefined;
 
   // BigQuery needs a billing project for schema resolution; Postgres does not.
-  if (connectorKind !== "postgres" && !billingProject && !process.env.BQ_PROJECT_ID) {
+  if (connectorKind === "bigquery" && !billingProject && !process.env.BQ_PROJECT_ID) {
     throw new Error(
       "billing_project is required for BigQuery models. " +
       "Set via parameter or BQ_PROJECT_ID env var.",
@@ -191,7 +203,19 @@ export async function refineModel(options: RefineModelOptions): Promise<Refineme
     };
   }
 
-  // Not feasible — return early with explanation
+  // Underspecified but groundable — ask a clarifying question instead of
+  // refusing. The relevant fields exist; only the criteria are missing.
+  if (!classification.feasible && classification.needs_clarification && classification.clarification_question) {
+    return {
+      success: false,
+      classification,
+      needs_clarification: true,
+      clarification_question: classification.clarification_question,
+      usage: totalUsage,
+    };
+  }
+
+  // Genuinely not feasible — no field can express it. Refuse honestly.
   if (!classification.feasible) {
     return {
       success: false,

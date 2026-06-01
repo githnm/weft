@@ -199,6 +199,7 @@ RULES:
   * key_measures: Which aggregations matter most for this purpose
   * key_dimensions: Which grouping dimensions are most useful
   * primary_table: Which table anchors the model (when ambiguous)
+  * json_dimensions: If a table lists "JSON keys in <col>", which of those keys to expose as dimensions (reference the ACTUAL keys and their frequencies; never offer array or unlisted keys)
 - 2-4 options per decision is ideal. Never exceed 5.
 - If a decision has an obvious answer for this schema, still include it but mark the obvious choice as recommended.`;
 
@@ -264,6 +265,22 @@ function buildFocusedDigest(
         desc += ` (${col.distinct_count} distinct)`;
       }
       lines.push(desc);
+
+      // JSON columns: list the proposable keys so a decision can offer them.
+      if (col.json_keys && col.json_keys.length > 0) {
+        const proposable = col.json_keys.filter((k) => k.kind === "scalar" && k.frequency >= 0.05);
+        if (proposable.length > 0) {
+          const keyList = proposable
+            .slice(0, 12)
+            .map((k) => `${k.path} (${k.value_type ?? "string"}, ${Math.round(k.frequency * 100)}%)`)
+            .join(", ");
+          lines.push(`    JSON keys in ${col.name}: ${keyList}`);
+        }
+        const arrays = col.json_keys.filter((k) => k.kind === "array").map((k) => k.path);
+        if (arrays.length > 0) {
+          lines.push(`    JSON arrays in ${col.name} (not auto-exposed): ${arrays.slice(0, 8).join(", ")}`);
+        }
+      }
     }
 
     // Enums with values

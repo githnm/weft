@@ -27,9 +27,17 @@ export type NormalizedType =
   | "date"
   | "time"
   | "bytes"
+  | "json"
   | "unsupported";
 
-export type ConnectorKind = "bigquery" | "postgres";
+export type ConnectorKind = "bigquery" | "postgres" | "duckdb" | "mysql" | "snowflake";
+
+/**
+ * Scalar value type inferred for a key extracted from a JSON/JSONB column.
+ * Drives the cast applied by the extraction expression. "string" is the
+ * safe default (used when a key's values have mixed types).
+ */
+export type JsonValueType = "string" | "int" | "float" | "boolean" | "timestamp";
 
 // ── Normalized type helpers ───────────────────────────────────
 
@@ -60,6 +68,7 @@ export function fallbackNormalizeType(rawType: string): NormalizedType {
   if (upper === "DATETIME") return "datetime";
   if (upper === "DATE") return "date";
   if (upper === "TIME") return "time";
+  if (upper === "JSON" || upper === "JSONB") return "json";
   return "unsupported";
 }
 
@@ -225,6 +234,30 @@ export interface Connector {
   /** Check if a raw type should be skipped during introspection */
   isSkippedType(rawType: string): boolean;
 
+  /**
+   * Check if a raw type is a JSON document type (Postgres json/jsonb,
+   * BigQuery JSON). JSON columns are NOT skipped — they are sampled at
+   * introspection so their common keys can be exposed as dimensions.
+   */
+  isJsonType(rawType: string): boolean;
+
+  // ── JSON key extraction ─────────────────────────────────────
+
+  /**
+   * Return the connector-specific SQL/Malloy expression that extracts a
+   * single key (by path) from a JSON column, cast to the given scalar type.
+   *
+   * - Postgres: `col ->> 'key'`, `col -> 'obj' ->> 'subkey'`, with casts
+   *   (`(col ->> 'n')::int`).
+   * - BigQuery: `JSON_VALUE(col, '$.key')`, wrapped in SAFE_CAST for non-string.
+   *
+   * `path` is the key path: ["browser"] for a top-level key, ["geo","country"]
+   * for one level of nesting. `nativeType` is the column's raw type (Postgres
+   * json vs jsonb selects the accessor function). The engine stays warehouse-
+   * agnostic — this is the single connector seam, mirroring aggregateSafeExpression.
+   */
+  jsonExtractExpression(column: string, path: string[], valueType: JsonValueType, nativeType?: string): string;
+
   // ── Aggregate safety ────────────────────────────────────────
 
   /**
@@ -286,7 +319,50 @@ export interface PostgresConnectorConfig {
   ssl?: boolean | { rejectUnauthorized: boolean };
 }
 
-export type ConnectorConfig = BigQueryConnectorConfig | PostgresConnectorConfig;
+export interface DuckDBConnectorConfig {
+  kind: "duckdb";
+  /**
+   * A FILE PATH — either a `.duckdb`/`.db` database file, or a data file
+   * (.parquet/.csv/.tsv/.json) that DuckDB reads directly. `:memory:` is also
+   * accepted. No host/port/credentials — this is the zero-setup path.
+   */
+  filePath: string;
+}
+
+export interface MySQLConnectorConfig {
+  kind: "mysql";
+  connectionString?: string;
+  host?: string;
+  port?: number;
+  database?: string;
+  user?: string;
+  password?: string;
+  /** SSL config — true for { rejectUnauthorized: false } (cloud MySQL default) */
+  ssl?: boolean | { rejectUnauthorized: boolean };
+}
+
+export interface SnowflakeConnectorConfig {
+  kind: "snowflake";
+  /** Org-account identifier, e.g. "myorg-myaccount". */
+  account: string;
+  username: string;
+  warehouse: string;
+  database: string;
+  schema?: string;
+  role?: string;
+  /** Password auth (omit when using key-pair). */
+  password?: string;
+  /** Key-pair auth: PATH to the private key PEM (not the key contents). */
+  privateKeyPath?: string;
+  privateKeyPassphrase?: string;
+}
+
+export type ConnectorConfig =
+  | BigQueryConnectorConfig
+  | PostgresConnectorConfig
+  | DuckDBConnectorConfig
+  | MySQLConnectorConfig
+  | SnowflakeConnectorConfig;
 
 // ── Offline aggregate safety ─────────────────────────────────
 
@@ -325,20 +401,151 @@ const BQ_AGGREGATE_CASTS: Record<string, string> = {
  * Returns the column expression (possibly with a cast), or null if the type
  * is un-aggregatable.
  */
+/** DuckDB: complex/un-aggregatable types (structs, lists, maps, json). */
+function duckdbComplex(lower: string): boolean {
+  return (
+    lower.includes("[]") ||
+    lower.startsWith("struct") ||
+    lower.startsWith("map") ||
+    lower.startsWith("list") ||
+    lower.startsWith("union") ||
+    lower === "json"
+  );
+}
+
+/** Snowflake: VARIANT/OBJECT/ARRAY/GEO are semi-structured → not aggregatable. */
+function snowflakeComplex(lower: string): boolean {
+  return ["variant", "object", "array", "geography", "geometry"].includes(lower);
+}
+
 export function getAggregateSafeExpression(
   connectorKind: ConnectorKind | undefined,
   columnName: string,
   nativeType: string,
 ): string | null {
-  const castMap = connectorKind === "postgres" ? PG_AGGREGATE_CASTS : BQ_AGGREGATE_CASTS;
   const lower = nativeType.toLowerCase();
+
+  // Connector-aware dialects whose raw types the BQ-centric fallback below
+  // doesn't recognize. DuckDB/MySQL aggregate scalars directly; Snowflake's
+  // semi-structured types are un-aggregatable; JSON is handled as keys.
+  if (connectorKind === "duckdb") {
+    return duckdbComplex(lower) ? null : columnName;
+  }
+  if (connectorKind === "mysql") {
+    return lower === "json" ? null : columnName;
+  }
+  if (connectorKind === "snowflake") {
+    return snowflakeComplex(lower) ? null : columnName;
+  }
+
+  const castMap = connectorKind === "postgres" ? PG_AGGREGATE_CASTS : BQ_AGGREGATE_CASTS;
 
   const cast = castMap[lower];
   if (cast) return `${columnName}${cast}`;
 
-  // If the type normalizes to "unsupported", it's un-aggregatable
+  // If the type normalizes to "unsupported" or "json", it's un-aggregatable
+  // as a whole column. (JSON keys are exposed as dimensions instead — see
+  // getJsonExtractExpression.)
   const normalized = fallbackNormalizeType(lower);
-  if (normalized === "unsupported") return null;
+  if (normalized === "unsupported" || normalized === "json") return null;
 
   return columnName; // No cast needed
+}
+
+// ── Offline JSON key extraction ──────────────────────────────
+//
+// Mirrors getAggregateSafeExpression: a standalone (no live connection)
+// function used by the build's table catalog and structural layer so JSON
+// dimensions can be generated and validated offline. The connector instances
+// delegate to this so there is ONE source of truth per connector.
+
+/** Quote a JSON object key as a single-quoted SQL string literal. */
+function sqlKeyLiteral(key: string): string {
+  return `'${key.replace(/'/g, "''")}'`;
+}
+
+/**
+ * Malloy cast suffix for a JSON scalar value type (string → none).
+ *
+ * Extraction functions return TEXT; the Malloy `::type` cast is dialect-
+ * agnostic (Malloy compiles it to the right per-warehouse CAST), so the same
+ * cast works for Postgres and BigQuery. Malloy has a single numeric type.
+ */
+function malloyCast(valueType: JsonValueType): string {
+  switch (valueType) {
+    case "int":
+    case "float": return "::number";
+    case "boolean": return "::boolean";
+    case "timestamp": return "::timestamp";
+    default: return "";
+  }
+}
+
+/** Build a BigQuery JSONPath ($.a.b) from a key path, best-effort. */
+function bqJsonPath(path: string[]): string {
+  // Simple identifier keys use dot notation; others fall back to bracket+quote.
+  return (
+    "$" +
+    path
+      .map((k) => (/^[A-Za-z_][A-Za-z0-9_]*$/.test(k) ? `.${k}` : `['${k.replace(/'/g, "\\'")}']`))
+      .join("")
+  );
+}
+
+/**
+ * Connector-aware Malloy expression that extracts one key (by path) from a
+ * JSON column, cast to a scalar type. `path.length === 1` is a top-level key;
+ * length 2 is one level of nesting. Deeper paths are still emitted but the
+ * introspector does not propose them.
+ *
+ * Malloy does not parse raw SQL operators (`->>`), so we use Malloy's raw-SQL
+ * function-call escape (`fn!(...)`) for the dialect's JSON accessor, then apply
+ * a dialect-agnostic Malloy `::type` cast for non-string values:
+ *
+ *   Postgres (jsonb):  jsonb_extract_path_text!(col, 'geo', 'country')
+ *                      jsonb_extract_path_text!(col, 'age')::number
+ *   Postgres (json):   json_extract_path_text!(col, 'geo', 'country')
+ *   BigQuery:          JSON_VALUE!(col, '$.geo.country')
+ *                      JSON_VALUE!(col, '$.age')::number
+ *
+ * `nativeType` (Postgres only) selects the json vs jsonb accessor function;
+ * it defaults to the jsonb accessor (the common case).
+ */
+export function getJsonExtractExpression(
+  connectorKind: ConnectorKind | undefined,
+  column: string,
+  path: string[],
+  valueType: JsonValueType = "string",
+  nativeType?: string,
+): string {
+  if (path.length === 0) return column;
+  const cast = malloyCast(valueType);
+
+  if (connectorKind === "postgres") {
+    const fn = (nativeType ?? "jsonb").toLowerCase() === "json"
+      ? "json_extract_path_text"
+      : "jsonb_extract_path_text";
+    const args = [column, ...path.map(sqlKeyLiteral)].join(", ");
+    return `${fn}!(${args})${cast}`;
+  }
+
+  if (connectorKind === "duckdb") {
+    // DuckDB: json_extract_string(col, '$.a.b') → TEXT.
+    return `json_extract_string!(${column}, '${bqJsonPath(path)}')${cast}`;
+  }
+
+  if (connectorKind === "mysql") {
+    // MySQL: json_unquote(json_extract(col, '$.a.b')) → TEXT.
+    return `json_unquote!(json_extract!(${column}, '${bqJsonPath(path)}'))${cast}`;
+  }
+
+  if (connectorKind === "snowflake") {
+    // Snowflake: GET_PATH(col, 'a.b') → VARIANT; cast (::string default below).
+    const sfPath = path.join(".");
+    return `get_path!(${column}, '${sfPath}')${cast || "::string"}`;
+  }
+
+  // BigQuery (default): JSON_VALUE returns a STRING; Malloy ::type cast handles
+  // typing (a bad cast yields NULL/erroring at query time, surfaced by probes).
+  return `JSON_VALUE!(${column}, '${bqJsonPath(path)}')${cast}`;
 }

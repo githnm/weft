@@ -1,7 +1,4 @@
-import fs from "node:fs/promises";
-import path from "node:path";
-import { confirmTerm, defineTermManually, saveManualTerm } from "../../terms/define.js";
-import { extractSourceSummary } from "../../agent/catalog.js";
+import { confirmTerm, defineTermManually, saveManualTerm, resolveSourceFilename } from "../../terms/define.js";
 
 /**
  * CLI: pnpm cli define <term> --confirm --models <dir>
@@ -11,7 +8,7 @@ import { extractSourceSummary } from "../../agent/catalog.js";
 export async function runDefineConfirm(options: {
   term: string;
   modelsDir: string;
-  billingProject: string;
+  billingProject?: string;
 }): Promise<void> {
   const { term, modelsDir, billingProject } = options;
 
@@ -43,23 +40,14 @@ export async function runDefineManual(options: {
   description: string;
   source?: string;
   modelsDir: string;
-  billingProject: string;
+  billingProject?: string;
 }): Promise<void> {
   const { term, description, modelsDir, billingProject } = options;
 
-  // Resolve source file
+  // Resolve source file — prefer the semantic model's model.malloy.
   let sourceFilename = options.source;
   if (!sourceFilename) {
-    // Auto-detect: use the first .malloy file that has a parseable source
-    const entries = await fs.readdir(modelsDir);
-    const malloyFiles = entries.filter((f) => f.endsWith(".malloy")).sort();
-    for (const f of malloyFiles) {
-      const content = await fs.readFile(path.join(modelsDir, f), "utf-8");
-      if (extractSourceSummary(f, content)) {
-        sourceFilename = f;
-        break;
-      }
-    }
+    sourceFilename = (await resolveSourceFilename(modelsDir)) ?? undefined;
     if (!sourceFilename) {
       console.error("\n  Error: No .malloy source files found. Specify --source explicitly.");
       process.exit(1);

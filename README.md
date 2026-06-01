@@ -4,7 +4,7 @@ Ask your data in plain English. Weft interviews you to build a semantic model ov
 
 A weft is the set of threads woven across the warp to make fabric. That is what this does: it weaves scattered tables into a model you can actually ask questions of.
 
-Built on [Malloy](https://www.malloydata.dev/) for the semantic layer. Works with BigQuery and Postgres. Runs as a CLI and as an [MCP](https://modelcontextprotocol.io/) server, so it works inside Cursor, Claude Desktop, Claude Code, or any MCP-capable IDE.
+Built on [Malloy](https://www.malloydata.dev/) for the semantic layer. Works with BigQuery, Postgres, DuckDB, MySQL, and Snowflake. Runs three ways: a CLI, an [MCP](https://modelcontextprotocol.io/) server (so it works inside Cursor, Claude Desktop, Claude Code, or any MCP-capable IDE), and a local web app.
 
 ## What it does
 
@@ -21,7 +21,7 @@ The point is the refusals. Weft checks feasibility before querying and verifies 
 
 Weft writes Malloy, not raw SQL. Malloy is a semantic layer: you define measures and dimensions once, and the agent composes queries from them. That is what makes answers trustworthy. The agent is not guessing at joins and grains every time. They are encoded in the model and compile-checked.
 
-It also means one engine targets multiple warehouses. The same model compiles to BigQuery SQL or Postgres SQL.
+It also means one engine targets multiple warehouses. The same model compiles to BigQuery, Postgres, DuckDB, MySQL, or Snowflake SQL. Warehouse-specific behavior — billing, SQL dialect, type quirks, JSON/JSONB extraction — lives behind a single connector interface; the rest of the engine is warehouse-agnostic.
 
 ## The build contract
 
@@ -32,7 +32,7 @@ A model is only valid if every measure the interview decided on actually compile
 * Node.js 20+
 * pnpm
 * An Anthropic API key
-* A BigQuery project (with `gcloud` auth) or a Postgres connection string
+* A warehouse: a BigQuery project (with `gcloud` auth), a Postgres/MySQL/Snowflake connection, or a local DuckDB/Parquet/CSV file
 
 ## Install
 
@@ -57,7 +57,22 @@ export BQ_PROJECT_ID="your-gcp-project"          # billing project
 
 # Postgres
 export POSTGRES_URL="postgresql://user:pass@host:5432/db?sslmode=no-verify"
+
+# MySQL
+export MYSQL_URL="mysql://user:pass@host:3306/db"
+
+# DuckDB (a .duckdb file, or a Parquet/CSV file to read directly)
+export DUCKDB_DATABASE="/absolute/path/to/data.duckdb"
+
+# Snowflake
+export SNOWFLAKE_ACCOUNT="org-account"
+export SNOWFLAKE_USER="user"
+export SNOWFLAKE_WAREHOUSE="WH"
+export SNOWFLAKE_DATABASE="DB"
+export SNOWFLAKE_PASSWORD="..."          # or SNOWFLAKE_PRIVATE_KEY_PATH for key-pair auth
 ```
+
+The web app stores connections for you (see [The web app](#the-web-app)); the env vars above are for the CLI and MCP server.
 
 Weft is read-only by design. It issues only `SELECT` and catalog queries. It never writes, creates, or drops anything. For extra safety against a production database, connect with a read-only role.
 
@@ -164,6 +179,22 @@ Restart the IDE fully (quit, do not just close the window), then talk to it:
 
 > Use my existing substrate. Design a semantic model for product usage with the recommended options, then tell me which workspaces have the most activity.
 
+## The web app
+
+A local web app wraps the same engine for people who would rather click than type CLI flags. Run it with:
+
+```bash
+pnpm --dir web install   # first time only
+pnpm web                 # serves the app + API on localhost
+```
+
+Four screens:
+
+* **Connections** — add and manage warehouse connections (BigQuery, Postgres, DuckDB, MySQL, Snowflake) from a form. Credentials are stored locally in `.weft/connections.json` (gitignored, `0600`) and never sent back to the browser — the UI only ever sees masked metadata. For BigQuery and Snowflake you point at a key file path, not key contents.
+* **Models** — design a semantic model through the same interview, in a guided wizard. The Tables step shows every table in your substrate split into the AI's recommended set and everything else, each searchable and freely checkable; your final selection is authoritative through the build. A split-pane editor shows the model and its compiled output side by side.
+* **Ask** — a conversational agent for asking questions and changing models. Model edits are proposed first and gated behind an explicit confirmation — it never writes silently. What-if simulations are reads and never touch the model.
+* **Context** — an entity-centric graph of the model: sources, measures, dimensions, terms, and the decisions and corrections that shaped them.
+
 ## The context graph
 
 Weft records the decisions it makes. Every ask, correction, refinement, and refusal is appended to a decision trace with its reasoning and outcome. Corrections link to the past answers they affect.
@@ -181,7 +212,7 @@ It finds the past questions that used the measure, re-runs them against the prop
 ## How it works
 
 ```
-Warehouse (BigQuery / Postgres)
+Warehouse (BigQuery / Postgres / DuckDB / MySQL / Snowflake)
         |
         v
    Introspection ---> substrate/   (schema, FKs, metadata, per-table .malloy)
@@ -202,7 +233,7 @@ Warehouse (BigQuery / Postgres)
 
 Three layers of memory persist across questions: captured metadata (time bounds, enum values, ranges), business terms (your vocabulary mapped to filters), and session state (so follow-ups inherit context).
 
-Two connectors share one interface. Warehouse-specific behavior (billing, cost, SQL dialect, type quirks) lives behind the connector; the rest of the engine is warehouse-agnostic.
+Five connectors (BigQuery, Postgres, DuckDB, MySQL, Snowflake) share one interface. Warehouse-specific behavior (billing, cost, SQL dialect, type quirks, JSON/JSONB extraction) lives behind the connector; the rest of the engine is warehouse-agnostic.
 
 ## Safety and trust
 
@@ -230,7 +261,7 @@ Things that will bite you, learned the hard way.
 
 ## Status
 
-Working v1, validated end to end on real BigQuery and Postgres databases through both the CLI and MCP, including a four-stage funnel across sessions, events, opportunities, and invoices.
+Working v1, validated end to end on real BigQuery, Postgres, and DuckDB databases through the CLI, MCP, and the web app, including a four-stage funnel across sessions, events, opportunities, and invoices. MySQL and Snowflake connectors are wired through the full stack and verified against live connection errors.
 
 It is a solid foundation, not a finished commercial product. Known rough edges: complex cross-grain models can produce measures that compile but need refinement; the natural-language layer does not always auto-apply saved terms; unusual schemas will surface new cases. The engine tells you when it is unsure rather than hiding it. Bug reports and pull requests welcome.
 

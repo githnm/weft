@@ -109,6 +109,12 @@ export function classifyColumn(col: ColumnInspection, tableName: string): Classi
     return { ...base, role: "dimension" };
   }
 
+  // j2. JSON document — queryable through its discovered keys (json_keys),
+  // not as a scalar dimension. Marked "attribute" so it surfaces in catalogs.
+  if (nt === "json") {
+    return { ...base, role: "attribute" };
+  }
+
   // k. Anything else
   return { ...base, role: "skip", skip_reason: `unhandled type: ${col.type}` };
 }
