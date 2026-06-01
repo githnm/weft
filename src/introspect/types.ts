@@ -144,8 +144,28 @@ export interface ClassificationResult {
 
 // === Introspection options (engine-level, connector-agnostic) ===
 
+/** Coarse stages emitted during introspection so a UI can show live progress. */
+export type IntrospectStage =
+  | "connecting"
+  | "listing_tables"
+  | "reading_columns"
+  | "sampling"
+  | "writing"
+  | "done";
+
+export interface IntrospectProgress {
+  stage: IntrospectStage;
+  message: string;
+  /** Total tables to inspect (known after listing). */
+  tablesTotal?: number;
+  /** Tables inspected so far. */
+  tablesDone?: number;
+}
+
 export interface IntrospectOptions {
   sampleRows: number;
   /** Force-skip enum capture for these table.column pairs (e.g. ["bikeshare_stations.address"]) */
   excludeEnums?: string[];
+  /** Optional progress callback — called as the scan moves through stages. */
+  onProgress?: (p: IntrospectProgress) => void;
 }

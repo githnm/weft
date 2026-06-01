@@ -36,12 +36,19 @@ A model is only valid if every measure the interview decided on actually compile
 
 ## Install
 
+This repo is a pnpm workspace: the engine (root) and the web client (`web/`)
+share a single install. One `pnpm install` at the root sets up both.
+
 ```bash
 git clone https://github.com/githnm/weft.git
 cd weft
-pnpm install
-pnpm build
+pnpm install     # installs BOTH the engine and the web client (web/)
+pnpm build       # compiles the engine and builds the web client
 ```
+
+Requires pnpm (`npm i -g pnpm`, or via Corepack). `pnpm build` builds
+everything; if you only need the engine (CLI/MCP), `pnpm build:engine` compiles
+just that.
 
 ## Environment
 
@@ -181,11 +188,10 @@ Restart the IDE fully (quit, do not just close the window), then talk to it:
 
 ## The web app
 
-A local web app wraps the same engine for people who would rather click than type CLI flags. Run it with:
+A local web app wraps the same engine for people who would rather click than type CLI flags. Its dependencies are already installed by the root `pnpm install` (workspace), so just run:
 
 ```bash
-pnpm --dir web install   # first time only
-pnpm web                 # serves the app + API on localhost
+pnpm web                 # builds the engine + client, then serves the app + API on localhost
 ```
 
 Four screens:

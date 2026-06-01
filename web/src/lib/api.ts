@@ -106,6 +106,8 @@ export interface ConnectionMeta {
   ssl?: boolean;
   project_id?: string;
   location?: string;
+  data_project?: string;
+  dataset?: string;
   key_file_path?: string;
   // duckdb
   file_path?: string;
@@ -116,6 +118,10 @@ export interface ConnectionMeta {
   schema?: string;
   role?: string;
   auth?: "password" | "key-pair";
+  /** This connection's own substrate directory (per-connection introspection). */
+  substrateDir?: string;
+  /** Whether this connection has been introspected (its substrate exists). */
+  hasSubstrate?: boolean;
 }
 
 export interface PostgresDraft {
@@ -132,8 +138,13 @@ export interface PostgresDraft {
 export interface BigQueryDraft {
   type: "bigquery";
   name: string;
+  /** Billing/compute project. */
   project_id: string;
   location?: string;
+  /** Data project (where the dataset lives). Defaults to project_id. */
+  data_project?: string;
+  /** Dataset to introspect. */
+  dataset?: string;
   key_file_path?: string;
 }
 
@@ -212,6 +223,82 @@ export async function testSavedConnection(id: string): Promise<TestResult> {
   const data = await r.json();
   if (!r.ok) return { ok: false, error: data?.error ?? `Test failed (${r.status})` };
   return data;
+}
+
+export interface IntrospectResult {
+  substrateDir: string;
+  datasetProject: string;
+  datasetName: string;
+  billingProject: string;
+  tableCount: number;
+  skippedCount: number;
+  bytesScanned: number;
+  warnings: string[];
+}
+
+export type IntrospectStage =
+  | "connecting"
+  | "listing_tables"
+  | "reading_columns"
+  | "sampling"
+  | "writing"
+  | "done";
+
+export interface IntrospectJobStatus {
+  id: string;
+  connectionId: string;
+  status: "running" | "done" | "error";
+  stage: IntrospectStage | string;
+  message: string;
+  tablesTotal: number | null;
+  tablesDone: number | null;
+  result: IntrospectResult | null;
+  error: string | null;
+}
+
+/** Start a background introspection job. Returns immediately with a job id. */
+export async function startIntrospection(id: string): Promise<{ jobId: string }> {
+  const r = await fetch(`/api/connections/${encodeURIComponent(id)}/introspect`, { method: "POST" });
+  const data = await r.json();
+  if (!r.ok) throw new Error(data?.error ?? `Could not start introspection (${r.status})`);
+  return data;
+}
+
+/** Poll a job's progress. */
+export async function getIntrospectStatus(jobId: string): Promise<IntrospectJobStatus> {
+  const r = await fetch(`/api/introspect/${encodeURIComponent(jobId)}/status`);
+  const data = await r.json();
+  if (!r.ok) throw new Error(data?.error ?? `Could not read job status (${r.status})`);
+  return data;
+}
+
+/**
+ * Start an introspection job and poll it to completion, reporting each progress
+ * tick via onProgress. Resolves with the final (done) status, rejects on error.
+ * Pass a `signal` to stop polling (e.g. on unmount) without rejecting.
+ */
+export async function runIntrospection(
+  id: string,
+  onProgress: (s: IntrospectJobStatus) => void,
+  signal?: { cancelled: boolean },
+): Promise<IntrospectJobStatus> {
+  const { jobId } = await startIntrospection(id);
+  return new Promise<IntrospectJobStatus>((resolve, reject) => {
+    const tick = async () => {
+      if (signal?.cancelled) return;
+      try {
+        const s = await getIntrospectStatus(jobId);
+        if (signal?.cancelled) return;
+        onProgress(s);
+        if (s.status === "done") return resolve(s);
+        if (s.status === "error") return reject(new Error(s.error || "Introspection failed"));
+        setTimeout(tick, 1000);
+      } catch (e) {
+        reject(e);
+      }
+    };
+    tick();
+  });
 }
 
 export async function activateConnection(id: string): Promise<void> {
@@ -326,6 +413,8 @@ export interface ModelDetail {
   name: string;
   purpose: string;
   connector: string | null;
+  /** The datasource (connection) this model was built from, if recorded. */
+  datasource: string | null;
   measures: { name: string; expr: string }[];
   dimensions: { name: string; expr: string }[];
   views: string[];
@@ -543,6 +632,23 @@ export async function designPlan(body: {
   return data;
 }
 
+// ── Design: decisions (generated from the finalized table set) ───
+
+export async function designDecisions(body: {
+  purpose: string;
+  substrate_dir?: string;
+  tables: string[];
+}): Promise<PlanDecision[]> {
+  const r = await fetch("/api/models/design/decisions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const data = await r.json();
+  if (!r.ok) throw new Error(data?.error ?? `Decisions failed (${r.status})`);
+  return data.decisions as PlanDecision[];
+}
+
 // ── Design: build ────────────────────────────────────────────────
 
 export interface ClarifyQuestion {
@@ -577,6 +683,7 @@ export async function designBuild(body: {
   definitions?: string[];
   substrate_dir?: string;
   clarifications?: { question: string; answer: string }[];
+  datasource?: string;
 }): Promise<BuildOutcome> {
   const r = await fetch("/api/models/design/build", {
     method: "POST",

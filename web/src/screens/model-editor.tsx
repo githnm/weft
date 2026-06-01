@@ -5,12 +5,15 @@ import {
   Check,
   CornerDownLeft,
   Database,
+  List,
   Loader2,
+  Network,
   Sparkles,
   Table2,
   Trash2,
 } from "lucide-react";
 
+import { cn } from "@/lib/utils";
 import { StagePill, type TimelineTone } from "@/components/stage-pill";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -18,6 +21,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { MalloyBlock } from "@/components/malloy-block";
+import { SemanticDiagram } from "@/components/semantic-diagram";
 import { DeleteModelDialog } from "@/components/delete-model-dialog";
 import {
   agentTurn,
@@ -93,6 +97,12 @@ export function ModelEditor({
               <div className="flex items-center gap-2">
                 <h1 className="font-mono text-lg font-normal tracking-tight">{detail.name}</h1>
                 {detail.connector && <Badge variant="outline">{detail.connector}</Badge>}
+                {detail.datasource && (
+                  <Badge variant="outline" className="gap-1">
+                    <Database className="size-3" strokeWidth={1.75} />
+                    {detail.datasource}
+                  </Badge>
+                )}
               </div>
               <p className="max-w-prose text-sm text-muted-foreground">{detail.purpose}</p>
             </div>
@@ -135,11 +145,66 @@ function ModelStatePane({ detail }: { detail: ModelDetail }) {
   const conceptFields = new Set(detail.concepts.map((c) => c.field));
   const plainMeasures = detail.measures.filter((m) => !conceptFields.has(m.name));
   const plainDimensions = detail.dimensions.filter((d) => !conceptFields.has(d.name));
+  const [view, setView] = useState<"diagram" | "details">("diagram");
 
   return (
     <div className="flex min-w-0 flex-col gap-4">
-      <SectionLabel>The model</SectionLabel>
+      <div className="flex items-center justify-between gap-3">
+        <SectionLabel>The model</SectionLabel>
+        <div className="inline-flex rounded-md border border-border p-0.5">
+          <ViewToggle active={view === "diagram"} onClick={() => setView("diagram")} icon={<Network className="size-3.5" strokeWidth={1.75} />} label="Diagram" />
+          <ViewToggle active={view === "details"} onClick={() => setView("details")} icon={<List className="size-3.5" strokeWidth={1.75} />} label="Details" />
+        </div>
+      </div>
 
+      {view === "diagram" ? (
+        <>
+          <SemanticDiagram detail={detail} />
+          <MalloyBlock code={detail.malloy} label="model.malloy" />
+        </>
+      ) : (
+        <DetailsView detail={detail} plainMeasures={plainMeasures} plainDimensions={plainDimensions} />
+      )}
+    </div>
+  );
+}
+
+function ViewToggle({
+  active,
+  onClick,
+  icon,
+  label,
+}: {
+  active: boolean;
+  onClick: () => void;
+  icon: React.ReactNode;
+  label: string;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={cn(
+        "flex items-center gap-1.5 rounded px-2.5 py-1 text-xs transition-colors",
+        active ? "bg-muted text-foreground" : "text-muted-foreground hover:text-foreground",
+      )}
+    >
+      {icon}
+      {label}
+    </button>
+  );
+}
+
+function DetailsView({
+  detail,
+  plainMeasures,
+  plainDimensions,
+}: {
+  detail: ModelDetail;
+  plainMeasures: { name: string; expr: string }[];
+  plainDimensions: { name: string; expr: string }[];
+}) {
+  return (
+    <div className="flex min-w-0 flex-col gap-4">
       {/* Sources + their fields */}
       <Card>
         <CardHeader className="border-b border-border py-2.5">

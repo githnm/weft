@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   ArrowLeft,
   Check,
@@ -6,6 +6,7 @@ import {
   Loader2,
   Plug,
   Plus,
+  ScanSearch,
   Trash2,
   Zap,
 } from "lucide-react";
@@ -27,14 +28,26 @@ import {
   activateConnection,
   createConnection,
   fetchConnections,
+  runIntrospection,
   removeConnection,
   testConnectionDraft,
   testSavedConnection,
   type ConnectionDraft,
   type ConnectionMeta,
   type ConnectorType,
+  type IntrospectJobStatus,
+  type IntrospectResult,
   type TestResult,
 } from "@/lib/api";
+
+const STAGE_LABEL: Record<string, string> = {
+  connecting: "Connecting",
+  listing_tables: "Listing tables",
+  reading_columns: "Reading columns",
+  sampling: "Reading tables",
+  writing: "Writing substrate",
+  done: "Done",
+};
 
 type Mode = { kind: "list" } | { kind: "add" };
 
@@ -150,6 +163,12 @@ function ConnectionCard({
   const [result, setResult] = useState<TestResult | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [scanning, setScanning] = useState(false);
+  const [progress, setProgress] = useState<IntrospectJobStatus | null>(null);
+  const [scan, setScan] = useState<{ ok: true; data: IntrospectResult } | { ok: false; error: string } | null>(null);
+  // Stop polling if the card unmounts mid-scan.
+  const cancel = useRef<{ cancelled: boolean }>({ cancelled: false });
+  useEffect(() => () => { cancel.current.cancelled = true; }, []);
 
   const test = () => {
     setTesting(true);
@@ -158,6 +177,27 @@ function ConnectionCard({
       .then(setResult)
       .catch((e) => setResult({ ok: false, error: e instanceof Error ? e.message : String(e) }))
       .finally(() => setTesting(false));
+  };
+
+  const introspect = () => {
+    if (scanning) return;
+    setScanning(true);
+    setScan(null);
+    setProgress(null);
+    cancel.current = { cancelled: false };
+    runIntrospection(conn.id, (s) => setProgress(s), cancel.current)
+      .then((s) => {
+        if (cancel.current.cancelled) return;
+        if (s.result) setScan({ ok: true, data: s.result });
+        onChanged(); // refresh the list → this connection flips to "ready"
+      })
+      .catch((e) => {
+        if (cancel.current.cancelled) return;
+        setScan({ ok: false, error: e instanceof Error ? e.message : String(e) });
+      })
+      .finally(() => {
+        if (!cancel.current.cancelled) setScanning(false);
+      });
   };
 
   const activate = () => {
@@ -180,14 +220,31 @@ function ConnectionCard({
             </CardTitle>
             <CardDescription className="font-mono text-xs">{conn.masked}</CardDescription>
           </div>
-          <Badge variant="outline">{conn.type}</Badge>
+          <div className="flex shrink-0 items-center gap-1.5">
+            {scanning ? (
+              <span className="inline-flex items-center gap-1 rounded-full bg-warn/10 px-2 py-0.5 text-[11px] font-medium text-warn">
+                <Loader2 className="size-3 animate-spin" /> introspecting…
+              </span>
+            ) : conn.hasSubstrate ? (
+              <span className="rounded-full bg-success/10 px-2 py-0.5 text-[11px] font-medium text-success">ready</span>
+            ) : (
+              <span className="rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
+                not introspected
+              </span>
+            )}
+            <Badge variant="outline">{conn.type}</Badge>
+          </div>
         </div>
       </CardHeader>
       <CardContent className="flex flex-col gap-3">
         <div className="flex items-center gap-2">
-          <Button size="sm" variant="outline" onClick={test} disabled={testing}>
+          <Button size="sm" variant="outline" onClick={test} disabled={testing || scanning}>
             {testing ? <Loader2 className="size-3.5 animate-spin" /> : <Zap className="size-3.5" />}
             {testing ? "Testing…" : "Test"}
+          </Button>
+          <Button size="sm" variant="outline" onClick={introspect} disabled={scanning || testing}>
+            {scanning ? <Loader2 className="size-3.5 animate-spin" /> : <ScanSearch className="size-3.5" />}
+            {scanning ? "Introspecting…" : "Introspect"}
           </Button>
           {!conn.active && (
             <Button size="sm" variant="ghost" onClick={activate} disabled={busy}>
@@ -215,6 +272,51 @@ function ConnectionCard({
         {result && !result.ok && (
           <VerificationCallout kind="caveat" title="Connection failed">
             {result.error}
+          </VerificationCallout>
+        )}
+
+        {scanning && (
+          <div className="flex flex-col gap-1.5 rounded-md border border-border bg-muted/40 px-3 py-2.5">
+            <div className="flex items-center gap-2">
+              <Loader2 className="size-3.5 shrink-0 animate-spin text-muted-foreground" />
+              <span className="text-xs font-medium text-foreground">
+                {STAGE_LABEL[progress?.stage ?? "connecting"] ?? "Working"}
+              </span>
+              {progress?.tablesTotal ? (
+                <span className="ml-auto shrink-0 text-[11px] tabular-nums text-muted-foreground">
+                  {progress.tablesDone ?? 0} / {progress.tablesTotal} tables
+                </span>
+              ) : null}
+            </div>
+            <span className="font-mono text-[11px] text-muted-foreground">{progress?.message ?? "Starting…"}</span>
+            {progress?.tablesTotal ? (
+              <div className="h-1 w-full overflow-hidden rounded-full bg-border-subtle">
+                <div
+                  className="h-full rounded-full bg-foreground/30 transition-all"
+                  style={{ width: `${Math.round(((progress.tablesDone ?? 0) / progress.tablesTotal) * 100)}%` }}
+                />
+              </div>
+            ) : null}
+          </div>
+        )}
+        {scan?.ok && (
+          <VerificationCallout kind="verified" title="Substrate built">
+            Introspected {scan.data.tableCount} table{scan.data.tableCount === 1 ? "" : "s"} from{" "}
+            <span className="font-mono">{scan.data.datasetProject}.{scan.data.datasetName}</span> (billed to{" "}
+            <span className="font-mono">{scan.data.billingProject}</span>) → <span className="font-mono">{scan.data.substrateDir}</span>.
+            {scan.data.skippedCount > 0 && ` ${scan.data.skippedCount} skipped.`}
+            {scan.data.warnings.length > 0 && (
+              <ul className="mt-1.5 list-disc pl-4">
+                {scan.data.warnings.map((w, i) => (
+                  <li key={i}>{w}</li>
+                ))}
+              </ul>
+            )}
+          </VerificationCallout>
+        )}
+        {scan && !scan.ok && (
+          <VerificationCallout kind="caveat" title="Introspection failed">
+            {scan.error}
           </VerificationCallout>
         )}
       </CardContent>
@@ -280,6 +382,8 @@ function AddConnectionForm({
   // BigQuery
   const [projectId, setProjectId] = useState("");
   const [location, setLocation] = useState("US");
+  const [dataProject, setDataProject] = useState("");
+  const [dataset, setDataset] = useState("");
   const [keyFilePath, setKeyFilePath] = useState("");
   // DuckDB
   const [filePath, setFilePath] = useState("");
@@ -305,7 +409,7 @@ function AddConnectionForm({
       case "mysql":
         return { type, name: name.trim(), host: host.trim(), port: Number(port) || 3306, database: database.trim(), user: user.trim(), password, ssl: mysqlSsl };
       case "bigquery":
-        return { type, name: name.trim(), project_id: projectId.trim(), location: location.trim() || "US", key_file_path: keyFilePath.trim() || undefined };
+        return { type, name: name.trim(), project_id: projectId.trim(), location: location.trim() || "US", data_project: dataProject.trim() || undefined, dataset: dataset.trim() || undefined, key_file_path: keyFilePath.trim() || undefined };
       case "duckdb":
         return { type, name: name.trim(), file_path: filePath.trim() };
       case "snowflake":
@@ -466,10 +570,19 @@ function AddConnectionForm({
 
         {type === "bigquery" && (
           <>
-            <Field label="Project ID">
+            <Field label="Project ID (billing)" hint="The GCP project that pays for and runs the query.">
               <Input value={projectId} onChange={(e) => setProjectId(e.target.value)} placeholder="my-gcp-project" className="font-mono" />
             </Field>
-            <Field label="Location" hint="BigQuery dataset region.">
+            <Field
+              label="Data project (optional)"
+              hint="Where the dataset lives. Leave blank to use your billing project. For public datasets, enter the dataset's project (e.g. bigquery-public-data)."
+            >
+              <Input value={dataProject} onChange={(e) => setDataProject(e.target.value)} placeholder="bigquery-public-data" className="font-mono" />
+            </Field>
+            <Field label="Dataset" hint="The dataset to introspect (e.g. google_analytics_sample).">
+              <Input value={dataset} onChange={(e) => setDataset(e.target.value)} placeholder="google_analytics_sample" className="font-mono" />
+            </Field>
+            <Field label="Location" hint="BigQuery dataset region (e.g. US, EU).">
               <Input value={location} onChange={(e) => setLocation(e.target.value)} placeholder="US" className="font-mono" />
             </Field>
             <Field

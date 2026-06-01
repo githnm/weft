@@ -17,6 +17,12 @@ export interface TestResult {
   error?: string;
 }
 
+/** Turn a raw driver error into a clear, specific message. Exported so the
+ *  introspect job surfaces the same quality of error as Test connection. */
+export function explainConnectionError(err: unknown): string {
+  return explain(err);
+}
+
 /** Turn a raw driver error into a clear, specific message. */
 function explain(err: unknown): string {
   const raw = err instanceof Error ? err.message : String(err);
@@ -41,6 +47,9 @@ function explain(err: unknown): string {
   }
   if (lower.includes("could not load the default credentials") || lower.includes("application default")) {
     return `BigQuery auth failed — run \`gcloud auth application-default login\`, or set a key-file path. (${raw})`;
+  }
+  if (lower.includes("not found") && lower.includes("dataset")) {
+    return `Dataset not found — check the Data project + Dataset. For public datasets the data project is the owner (e.g. bigquery-public-data), not your billing project. (${raw})`;
   }
   if (lower.includes("no such file") || lower.includes("enoent") || lower.includes("io error") || lower.includes("cannot open")) {
     return `File not found or unreadable — check the path. Point at a .duckdb file or a Parquet/CSV. (${raw})`;
@@ -71,6 +80,37 @@ export async function testConnectionRecord(record: ConnectionRecord): Promise<Te
       return { ok: false, error: explain(err) };
     } finally {
       await connector.close().catch(() => {});
+    }
+  }
+
+  // BigQuery with a dataset: verify the data-project + dataset + billing combo
+  // end to end by listing the dataset's tables (INFORMATION_SCHEMA metadata —
+  // cheap). This catches a wrong data project / unreachable dataset, which a
+  // bare auth probe would miss.
+  if (record.type === "bigquery" && record.dataset?.trim()) {
+    const prevCreds = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+    if (record.key_file_path) process.env.GOOGLE_APPLICATION_CREDENTIALS = record.key_file_path;
+    const connector = createConnector({
+      kind: "bigquery",
+      project: record.data_project?.trim() || record.project_id,
+      dataset: record.dataset.trim(),
+      billingProject: record.project_id,
+      location: record.location,
+    });
+    try {
+      await Promise.race([
+        connector.listTables(),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error("Connection timed out (12s)")), TEST_TIMEOUT_MS)),
+      ]);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: explain(err) };
+    } finally {
+      await connector.close().catch(() => {});
+      if (record.key_file_path) {
+        if (prevCreds === undefined) delete process.env.GOOGLE_APPLICATION_CREDENTIALS;
+        else process.env.GOOGLE_APPLICATION_CREDENTIALS = prevCreds;
+      }
     }
   }
 

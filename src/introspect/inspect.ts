@@ -446,15 +446,53 @@ export interface InspectResult {
   metadataBytesScanned: number;
 }
 
+/**
+ * Detect date-sharded tables (e.g. ga_sessions_20170801) and collapse each
+ * shard family into ONE logical wildcard source (ga_sessions_*). BigQuery
+ * treats `prefix_*` as a single wildcard table, so we inspect only the latest
+ * shard (schemas are identical across shards) instead of all ~366 of them.
+ */
+export function collapseDateShards(names: string[]): {
+  kept: string[];
+  groups: Map<string, { logical: string; members: string[] }>;
+} {
+  const SHARD = /^(.+?)_(\d{8})$/; // <base>_YYYYMMDD
+  const byBase = new Map<string, string[]>();
+  const nonShard: string[] = [];
+  for (const n of names) {
+    const m = n.match(SHARD);
+    if (m) {
+      if (!byBase.has(m[1])) byBase.set(m[1], []);
+      byBase.get(m[1])!.push(n);
+    } else {
+      nonShard.push(n);
+    }
+  }
+  const kept = [...nonShard];
+  const groups = new Map<string, { logical: string; members: string[] }>();
+  for (const [base, members] of byBase) {
+    if (members.length >= 2) {
+      members.sort(); // ascending — last is the most recent shard
+      const rep = members[members.length - 1];
+      kept.push(rep);
+      groups.set(rep, { logical: `${base}_*`, members });
+    } else {
+      kept.push(...members); // a lone date-suffixed table is not a shard family
+    }
+  }
+  return { kept, groups };
+}
+
 export async function inspectDataset(
   connector: Connector,
   options: IntrospectOptions,
 ): Promise<InspectResult> {
-  const { sampleRows } = options;
+  const { sampleRows, onProgress } = options;
   let totalBytes = 0;
   let totalMetadataBytes = 0;
   const warnings: string[] = [];
 
+  onProgress?.({ stage: "listing_tables", message: `Listing tables in ${connector.datasetProject()}.${connector.datasetName()}…` });
   console.log(`  Listing tables in ${connector.datasetProject()}.${connector.datasetName()}...`);
   const { tables: allRawTables, bytesProcessed: b1 } = await connector.listTables();
   totalBytes += b1;
@@ -477,6 +515,24 @@ export async function inspectDataset(
   console.log("");
   console.log(`  Found ${allRawTables.length} tables (${includedTables.length} included, ${skippedTables.length} skipped)`);
 
+  // Collapse date-sharded tables (ga_sessions_YYYYMMDD → ga_sessions_*) so we
+  // inspect one representative shard, not hundreds. BigQuery wildcard tables
+  // make the collapsed source directly queryable.
+  let shardGroups = new Map<string, { logical: string; members: string[] }>();
+  let inspectList = includedTables;
+  if (connector.kind === "bigquery") {
+    const collapsed = collapseDateShards(includedTables);
+    inspectList = collapsed.kept;
+    shardGroups = collapsed.groups;
+    if (shardGroups.size > 0) {
+      const totalShards = [...shardGroups.values()].reduce((s, g) => s + g.members.length, 0);
+      const logicals = [...shardGroups.values()].map((g) => g.logical).join(", ");
+      const msg = `${totalShards} date-sharded tables collapsed into ${shardGroups.size} wildcard source(s): ${logicals}`;
+      warnings.push(msg);
+      console.log(`  ${msg}`);
+    }
+  }
+
   // Fetch row counts for sampling decisions
   let rowCounts = new Map<string, number>();
   try {
@@ -487,6 +543,7 @@ export async function inspectDataset(
     warnings.push("Could not fetch row counts from __TABLES__, sampling disabled");
   }
 
+  onProgress?.({ stage: "reading_columns", message: "Reading column metadata…", tablesTotal: inspectList.length, tablesDone: 0 });
   console.log("  Fetching column metadata...");
   const { columns: allColumns, bytesProcessed: b2 } = await connector.getColumns();
   totalBytes += b2;
@@ -506,10 +563,18 @@ export async function inspectDataset(
   }
 
   const tables: TableInspection[] = [];
-  for (const tableName of includedTables) {
+  for (let idx = 0; idx < inspectList.length; idx++) {
+    const tableName = inspectList[idx];
+    const group = shardGroups.get(tableName);
     const estimate = rowCounts.get(tableName) ?? 0;
     const sampleNote = estimate > SAMPLE_THRESHOLD ? ` (${estimate.toLocaleString()} rows, will sample)` : "";
-    console.log(`  Inspecting ${tableName}...${sampleNote}`);
+    onProgress?.({
+      stage: "sampling",
+      message: `Reading ${group ? group.logical : tableName} (${idx + 1} of ${inspectList.length})`,
+      tablesTotal: inspectList.length,
+      tablesDone: idx,
+    });
+    console.log(`  Inspecting ${tableName}...${sampleNote}${group ? ` → ${group.logical}` : ""}`);
     const { table, bytesProcessed, metadataBytes } = await inspectTable(
       connector,
       tableName,
@@ -521,8 +586,16 @@ export async function inspectDataset(
     );
     totalBytes += bytesProcessed;
     totalMetadataBytes += metadataBytes;
+    // For a shard family, present it as the wildcard source and sum row counts.
+    if (group) {
+      table.name = group.logical;
+      table.malloy_table_source = connector.malloyTableSource(group.logical);
+      table.row_count = group.members.reduce((s, m) => s + (rowCounts.get(m) ?? 0), 0);
+    }
     tables.push(table);
   }
+
+  onProgress?.({ stage: "sampling", message: "Finished reading tables", tablesTotal: inspectList.length, tablesDone: inspectList.length });
 
   // Fetch real foreign key constraints (Postgres has them; BigQuery returns [])
   let foreignKeys;

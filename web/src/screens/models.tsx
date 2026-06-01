@@ -5,9 +5,11 @@ import {
   Boxes,
   Check,
   ChevronRight,
+  Database,
   Loader2,
   MoreHorizontal,
   Plus,
+  ScanSearch,
   Search,
   Sparkles,
   Trash2,
@@ -25,16 +27,30 @@ import { VerificationCallout } from "@/components/verification-callout";
 import { DeleteModelDialog } from "@/components/delete-model-dialog";
 import { ModelEditor } from "./model-editor";
 import {
+  activateConnection,
   addDefinition,
   designBuild,
+  designDecisions,
   designPlan,
-  fetchHealth,
+  fetchConnections,
   fetchModels,
+  runIntrospection,
   type BuildOutcome,
+  type ConnectionMeta,
   type DefinitionOutcome,
   type DesignPlan,
+  type IntrospectJobStatus,
   type ModelInfo,
 } from "@/lib/api";
+
+const INTROSPECT_STAGE_LABEL: Record<string, string> = {
+  connecting: "Connecting",
+  listing_tables: "Listing tables",
+  reading_columns: "Reading columns",
+  sampling: "Reading tables",
+  writing: "Writing substrate",
+  done: "Done",
+};
 
 /** Parse a comma/space-separated aliases input into a clean list. */
 function parseAliases(raw: string): string[] {
@@ -231,7 +247,7 @@ function CardActions({ name, onRequestDelete }: { name: string; onRequestDelete:
 
 // ── Design wizard ────────────────────────────────────────────────
 
-type Step = "form" | "plan" | "decisions" | "definitions" | "building" | "result";
+type Step = "datasource" | "form" | "plan" | "decisions" | "definitions" | "building" | "result";
 
 function DesignWizard({
   onCancel,
@@ -240,28 +256,87 @@ function DesignWizard({
   onCancel: () => void;
   onBuilt: (name: string) => void;
 }) {
-  const [step, setStep] = useState<Step>("form");
+  const [step, setStep] = useState<Step>("datasource");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Step 0
+  // Step 0 — datasource selection. The chosen connection's substrate drives the
+  // ENTIRE build (plan → decisions → build); no default/shared substrate is used.
+  const [connections, setConnections] = useState<ConnectionMeta[] | null>(null);
+  const [selectedConn, setSelectedConn] = useState<ConnectionMeta | null>(null);
+  const [introspectingId, setIntrospectingId] = useState<string | null>(null);
+  const [introspectProgress, setIntrospectProgress] = useState<IntrospectJobStatus | null>(null);
+
+  // Step 1
   const [name, setName] = useState("");
   const [purpose, setPurpose] = useState("");
   const [tablesInput, setTablesInput] = useState("");
+  // Substrate dir is derived from the selected datasource — never free-typed.
   const [substrateDir, setSubstrateDir] = useState("");
 
-  // Prefill the substrate directory from the server's configured default.
+  const loadConnections = () =>
+    fetchConnections()
+      .then(({ connections }) => {
+        setConnections(connections);
+        // If exactly one datasource is connected, pre-select it (still shown).
+        if (connections.length === 1) setSelectedConn(connections[0]);
+        return connections;
+      })
+      .catch((e) => {
+        setError(e instanceof Error ? e.message : String(e));
+        return [] as ConnectionMeta[];
+      });
+
   useEffect(() => {
-    fetchHealth()
-      .then((h) => setSubstrateDir((cur) => cur || h.substrateDir))
-      .catch(() => {});
+    loadConnections();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Commit a chosen datasource: activate it (so creds/env follow this
+  // connection) and pin its substrate for the whole build, then move on.
+  const chooseDatasource = async (conn: ConnectionMeta) => {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await activateConnection(conn.id);
+      setSelectedConn(conn);
+      setSubstrateDir(conn.substrateDir ?? "");
+      setStep("form");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Introspect a not-yet-ready datasource straight from the selector — runs as
+  // a background job with live progress, then re-selects it as ready.
+  const introspectDatasource = async (conn: ConnectionMeta) => {
+    if (introspectingId) return;
+    setIntrospectingId(conn.id);
+    setIntrospectProgress(null);
+    setError(null);
+    try {
+      await runIntrospection(conn.id, (s) => setIntrospectProgress(s));
+      const fresh = await loadConnections();
+      const updated = fresh.find((c) => c.id === conn.id);
+      if (updated) setSelectedConn(updated);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setIntrospectingId(null);
+      setIntrospectProgress(null);
+    }
+  };
 
   // Step 1–2
   const [plan, setPlan] = useState<DesignPlan | null>(null);
   const [selectedTables, setSelectedTables] = useState<Set<string>>(new Set());
   const [tableSearch, setTableSearch] = useState("");
   const [choices, setChoices] = useState<Record<string, string>>({});
+  // Sorted-join key of the table set the current decisions were generated from.
+  const [decisionsTablesKey, setDecisionsTablesKey] = useState("");
 
   // Step 2.5 — open custom definitions (baked into the model, with aliases)
   const [definitions, setDefinitions] = useState<{ text: string; aliases: string }[]>([]);
@@ -301,16 +376,50 @@ function DesignWizard({
           ),
         );
         setTableSearch("");
-        const initial: Record<string, string> = {};
-        for (const d of p.decisions) {
-          const rec = d.options.find((o) => o.recommended) ?? d.options[0];
-          if (rec) initial[d.id] = rec.label;
-        }
-        setChoices(initial);
+        // Decisions are generated later (runDecisions), from the finalized
+        // table set — not pre-generated against the AI's original proposal.
+        setChoices({});
+        setDecisionsTablesKey("");
         setStep("plan");
       })
       .catch((e) => setError(e instanceof Error ? e.message : String(e)))
       .finally(() => setBusy(false));
+  };
+
+  // Generate decisions FROM the user's finalized table selection. Called on
+  // Continue from the Tables step. Regenerates only when the selected set
+  // differs from the set the current decisions were generated against, so
+  // dropped tables can never linger in options and added tables are considered.
+  const tablesKey = (s: Set<string>) => [...s].sort().join("|");
+  const runDecisions = async () => {
+    if (!plan || busy) return;
+    const key = tablesKey(selectedTables);
+    if (key === decisionsTablesKey && plan.decisions.length > 0) {
+      setStep("decisions"); // unchanged selection — reuse existing decisions
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const decisions = await designDecisions({
+        purpose: plan.purpose,
+        substrate_dir: plan.substrateDir || undefined,
+        tables: [...selectedTables],
+      });
+      setPlan({ ...plan, decisions });
+      const initial: Record<string, string> = {};
+      for (const d of decisions) {
+        const rec = d.options.find((o) => o.recommended) ?? d.options[0];
+        if (rec) initial[d.id] = rec.label;
+      }
+      setChoices(initial);
+      setDecisionsTablesKey(key);
+      setStep("decisions");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
   };
 
   const runBuild = async (extraClarification?: { question: string; answer: string }[]) => {
@@ -336,6 +445,7 @@ function DesignWizard({
         relevant_tables: relevant,
         substrate_dir: substrateDir.trim() || undefined,
         clarifications: allClarifications.length ? allClarifications : undefined,
+        datasource: selectedConn?.name,
       });
       setClarifications(allClarifications);
 
@@ -390,7 +500,128 @@ function DesignWizard({
         </div>
       )}
 
-      {/* Step 0 — form */}
+      {/* Step 0 — datasource selector. Drives the substrate for the whole build. */}
+      {step === "datasource" && (
+        <div className="flex flex-col gap-4">
+          <div className="flex flex-col gap-1">
+            <h2 className="text-sm font-medium text-foreground">Which datasource?</h2>
+            <p className="text-sm text-muted-foreground">
+              The datasource you pick determines the schema this model is built from. Everything
+              downstream — proposed tables, decisions, and the build — reads from its substrate.
+            </p>
+          </div>
+
+          {connections === null && (
+            <div className="flex items-center gap-2 py-6 text-sm text-muted-foreground">
+              <Loader2 className="size-4 animate-spin" /> Loading datasources…
+            </div>
+          )}
+
+          {connections && connections.length === 0 && (
+            <div className="rounded-md border border-dashed border-border px-4 py-6 text-sm text-muted-foreground">
+              No datasources connected. Add one on the <span className="font-medium text-foreground">Connections</span> screen, then introspect it.
+            </div>
+          )}
+
+          {connections && connections.length > 0 && (
+            <div className="flex flex-col gap-2">
+              {connections.map((c) => {
+                const on = selectedConn?.id === c.id;
+                return (
+                  <button
+                    key={c.id}
+                    onClick={() => setSelectedConn(c)}
+                    className={cn(
+                      "flex items-center gap-3 rounded-md border px-3 py-2.5 text-left transition-colors",
+                      on ? "border-foreground/40 bg-muted" : "border-border hover:bg-muted",
+                    )}
+                  >
+                    <Database className="size-4 shrink-0 text-muted-foreground" strokeWidth={1.75} />
+                    <span className="flex min-w-0 flex-col gap-0.5">
+                      <span className="flex items-center gap-2">
+                        <span className="font-mono text-sm text-foreground">{c.name}</span>
+                        <Badge variant="outline">{c.type}</Badge>
+                        {c.active && <Badge variant="success">active</Badge>}
+                      </span>
+                      <span className="font-mono text-[11px] text-muted-foreground">{c.masked}</span>
+                    </span>
+                    <span
+                      className={cn(
+                        "ml-auto shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium",
+                        c.hasSubstrate ? "bg-success/10 text-success" : "bg-warn/10 text-warn",
+                      )}
+                    >
+                      {c.hasSubstrate ? "ready" : "not introspected yet"}
+                    </span>
+                  </button>
+                );
+              })}
+
+              {/* Not-introspected prompt — NEVER silently fall back to another substrate. */}
+              {selectedConn && !selectedConn.hasSubstrate && (
+                <div className="flex flex-col gap-2 rounded-md border border-warn/30 bg-warn/5 px-3.5 py-3">
+                  <p className="text-sm text-foreground">
+                    <span className="font-mono">{selectedConn.name}</span> hasn't been introspected yet —
+                    introspect it first so there's a schema to build from.
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    This scans the warehouse and writes its substrate. It can take a few minutes for a large
+                    dataset. You can also run it from the Connections screen.
+                  </p>
+                  {introspectingId === selectedConn.id ? (
+                    <div className="flex flex-col gap-1.5 rounded-md border border-border bg-card px-3 py-2.5">
+                      <div className="flex items-center gap-2">
+                        <Loader2 className="size-3.5 shrink-0 animate-spin text-muted-foreground" />
+                        <span className="text-xs font-medium text-foreground">
+                          {INTROSPECT_STAGE_LABEL[introspectProgress?.stage ?? "connecting"] ?? "Working"}
+                        </span>
+                        {introspectProgress?.tablesTotal ? (
+                          <span className="ml-auto shrink-0 text-[11px] tabular-nums text-muted-foreground">
+                            {introspectProgress.tablesDone ?? 0} / {introspectProgress.tablesTotal} tables
+                          </span>
+                        ) : null}
+                      </div>
+                      <span className="font-mono text-[11px] text-muted-foreground">
+                        {introspectProgress?.message ?? "Starting…"}
+                      </span>
+                      {introspectProgress?.tablesTotal ? (
+                        <div className="h-1 w-full overflow-hidden rounded-full bg-border-subtle">
+                          <div
+                            className="h-full rounded-full bg-foreground/30 transition-all"
+                            style={{
+                              width: `${Math.round(((introspectProgress.tablesDone ?? 0) / introspectProgress.tablesTotal) * 100)}%`,
+                            }}
+                          />
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : (
+                    <div>
+                      <Button size="sm" variant="outline" onClick={() => introspectDatasource(selectedConn)}>
+                        <ScanSearch className="size-3.5" />
+                        Introspect now
+                      </Button>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <div className="flex justify-end pt-1">
+                <Button
+                  onClick={() => selectedConn && chooseDatasource(selectedConn)}
+                  disabled={busy || !selectedConn || !selectedConn.hasSubstrate}
+                >
+                  {busy ? <Loader2 className="size-3.5 animate-spin" /> : null}
+                  Continue
+                  <ChevronRight className="size-3.5" />
+                </Button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Step 1 — form */}
       {step === "form" && (
         <div className="flex flex-col gap-4">
           <Field label="Model name">
@@ -409,17 +640,22 @@ function DesignWizard({
               className="min-h-[72px]"
             />
           </Field>
-          <Field
-            label="Substrate directory"
-            hint="Where your introspected substrate lives (defaults to the server's configured WEFT_SUBSTRATE_DIR)."
-          >
-            <Input
-              value={substrateDir}
-              onChange={(e) => setSubstrateDir(e.target.value)}
-              placeholder="./substrate"
-              className="font-mono"
-            />
-          </Field>
+          {selectedConn && (
+            <div className="flex items-center justify-between gap-3 rounded-md border border-border bg-muted/40 px-3.5 py-2.5">
+              <span className="flex items-center gap-2 text-sm text-muted-foreground">
+                <Database className="size-3.5" strokeWidth={1.75} />
+                Building on
+                <span className="font-mono text-foreground">{selectedConn.name}</span>
+                <Badge variant="outline">{selectedConn.type}</Badge>
+              </span>
+              <button
+                onClick={() => setStep("datasource")}
+                className="text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
+              >
+                Change datasource
+              </button>
+            </div>
+          )}
           <Field label="Limit to specific tables" hint="Optional — comma or space separated. Leave blank to let Weft choose.">
             <Input
               value={tablesInput}
@@ -549,9 +785,10 @@ function DesignWizard({
 
             <div className="flex items-center justify-between">
               <span className="text-xs text-muted-foreground">{selectedTables.size} tables selected</span>
-              <Button onClick={() => setStep("decisions")} disabled={selectedTables.size === 0}>
-                Continue to decisions
-                <ChevronRight className="size-3.5" />
+              <Button onClick={runDecisions} disabled={selectedTables.size === 0 || busy}>
+                {busy ? <Loader2 className="size-3.5 animate-spin" /> : null}
+                {busy ? "Generating decisions…" : "Continue to decisions"}
+                {busy ? null : <ChevronRight className="size-3.5" />}
               </Button>
             </div>
           </div>
@@ -925,13 +1162,14 @@ function ResultView({
 
 function WizardHeader({ step }: { step: Step }) {
   const labels: { id: Step; label: string }[] = [
+    { id: "datasource", label: "Datasource" },
     { id: "form", label: "Purpose" },
     { id: "plan", label: "Tables" },
     { id: "decisions", label: "Decisions" },
     { id: "definitions", label: "Definitions" },
     { id: "result", label: "Build" },
   ];
-  const order: Step[] = ["form", "plan", "decisions", "definitions", "building", "result"];
+  const order: Step[] = ["datasource", "form", "plan", "decisions", "definitions", "building", "result"];
   const current = order.indexOf(step);
   return (
     <div className="flex items-center gap-2">

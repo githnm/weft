@@ -25,6 +25,7 @@ export async function runIntrospect(
 
   const { inspection, metadataBytesScanned } = await inspectDataset(connector, options);
 
+  options.onProgress?.({ stage: "writing", message: "Writing substrate + generating models…" });
   const jsonPath = path.join(outputDir, "inspection.json");
   await fs.mkdir(outputDir, { recursive: true });
   await fs.writeFile(jsonPath, JSON.stringify(inspection, null, 2), "utf-8");

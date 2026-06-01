@@ -70,7 +70,7 @@ console.log = console.error;
 
 // ── Create server ────────────────────────────────────────────
 const server = new McpServer({
-  name: "agentic-analytics",
+  name: "weft",
   version: "0.1.0",
 });
 

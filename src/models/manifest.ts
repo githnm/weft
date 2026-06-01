@@ -38,6 +38,8 @@ export interface ModelManifest {
   created_at: string;
   /** Connector that produced the substrate (bigquery | postgres) */
   connector_kind?: string;
+  /** Human label of the datasource (connection) this model was built from. */
+  datasource?: string;
   /** Design provenance from the model interview (stage 2) */
   design?: DesignProvenance;
   /** History of refinements applied to this model */

@@ -311,30 +311,19 @@ function buildFocusedDigest(
     lines.push("");
   }
 
-  // Also note FKs to tables outside the selection (useful context)
-  const externalJoins = classification.inferred_joins.filter(
-    (j) =>
-      (selectedSet.has(j.source_table.toLowerCase()) && !selectedSet.has(j.target_table.toLowerCase())) ||
-      (!selectedSet.has(j.source_table.toLowerCase()) && selectedSet.has(j.target_table.toLowerCase())),
-  );
-  if (externalJoins.length > 0) {
-    lines.push("FK RELATIONSHIPS (to excluded tables):");
-    for (const j of externalJoins) {
-      lines.push(`  ${j.source_table}.${j.source_column} → ${j.target_table}.${j.target_column}`);
-    }
-    lines.push("");
-  }
+  // NOTE: FKs to tables OUTSIDE the selection are deliberately omitted. The
+  // user's selected set is authoritative for decisions — surfacing excluded
+  // (e.g. user-dropped) tables here would let them leak into decision options.
 
   return lines.join("\n");
 }
 
 // ── Main: propose_model_plan ─────────────────────────────────────
 
-export async function proposeModelPlan(
-  purpose: string,
+/** Read substrate inspection + optional metadata. Shared by the plan steps. */
+async function readSubstrate(
   substrateDir: string,
-): Promise<ModelPlan> {
-  // Step A: Read the substrate
+): Promise<{ inspection: InspectionResult; metadata?: DatasetMetadata }> {
   const inspectionPath = path.join(substrateDir, "inspection.json");
   let inspectionRaw: string;
   try {
@@ -349,37 +338,78 @@ export async function proposeModelPlan(
 
   let metadata: DatasetMetadata | undefined;
   try {
-    const metaRaw = await fs.readFile(path.join(substrateDir, "metadata.json"), "utf-8");
-    metadata = JSON.parse(metaRaw);
+    metadata = JSON.parse(await fs.readFile(path.join(substrateDir, "metadata.json"), "utf-8"));
   } catch {
     // metadata is optional
   }
+  return { inspection, metadata };
+}
 
+/**
+ * Propose tables only (Steps A+B). Decisions are deliberately NOT generated
+ * here — they are generated later, from the user's FINALIZED table set, so they
+ * never reference a table the user dropped or miss one the user added.
+ */
+export async function proposeTables(
+  purpose: string,
+  substrateDir: string,
+): Promise<{
+  relevant_tables: RelevantTable[];
+  excluded_tables_count: number;
+  table_selection_reasoning: string;
+  substrate_dir: string;
+  usage: LLMUsage;
+}> {
+  const { inspection, metadata } = await readSubstrate(substrateDir);
   const schemaDigest = buildSchemaDigest(inspection, metadata);
-
-  // Step B: Select candidate tables
   const tableSelection = await selectTables(purpose, schemaDigest);
-
-  let totalUsage: LLMUsage = tableSelection.usage;
-
-  // Step C: Identify decisions
-  const selectedNames = tableSelection.tables.map((t) => t.name);
-  const focusedDigest = buildFocusedDigest(inspection, metadata, selectedNames);
-
-  const decisionsResult = await identifyDecisions(purpose, focusedDigest);
-  totalUsage = {
-    inputTokens: totalUsage.inputTokens + decisionsResult.usage.inputTokens,
-    outputTokens: totalUsage.outputTokens + decisionsResult.usage.outputTokens,
-  };
-
   return {
-    purpose,
     relevant_tables: tableSelection.tables,
     excluded_tables_count: tableSelection.excludedCount,
     table_selection_reasoning: tableSelection.reasoning,
+    substrate_dir: substrateDir,
+    usage: tableSelection.usage,
+  };
+}
+
+/**
+ * Generate modeling decisions from an EXACT table set (Step C). The caller's
+ * table list is authoritative: the focused digest — and therefore every option
+ * the model can produce — is built from ONLY these tables. A dropped table can
+ * never appear in an option; an added table is fully considered.
+ */
+export async function generateDecisionsForTables(
+  purpose: string,
+  substrateDir: string,
+  tableNames: string[],
+): Promise<{ decisions: Decision[]; usage: LLMUsage }> {
+  const { inspection, metadata } = await readSubstrate(substrateDir);
+  const focusedDigest = buildFocusedDigest(inspection, metadata, tableNames);
+  return identifyDecisions(purpose, focusedDigest);
+}
+
+export async function proposeModelPlan(
+  purpose: string,
+  substrateDir: string,
+): Promise<ModelPlan> {
+  // Steps A+B: select tables.
+  const tables = await proposeTables(purpose, substrateDir);
+
+  // Step C: decisions, generated from the selected tables.
+  const selectedNames = tables.relevant_tables.map((t) => t.name);
+  const decisionsResult = await generateDecisionsForTables(purpose, substrateDir, selectedNames);
+
+  return {
+    purpose,
+    relevant_tables: tables.relevant_tables,
+    excluded_tables_count: tables.excluded_tables_count,
+    table_selection_reasoning: tables.table_selection_reasoning,
     decisions: decisionsResult.decisions,
     substrate_dir: substrateDir,
-    usage: totalUsage,
+    usage: {
+      inputTokens: tables.usage.inputTokens + decisionsResult.usage.inputTokens,
+      outputTokens: tables.usage.outputTokens + decisionsResult.usage.outputTokens,
+    },
   };
 }
 

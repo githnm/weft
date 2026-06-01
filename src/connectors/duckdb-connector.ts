@@ -76,6 +76,20 @@ function asISO(v: unknown): string | undefined {
   return String(v);
 }
 
+/**
+ * Coerce a @duckdb/node-api cell into a JSON-safe primitive. The driver returns
+ * BigInt for BIGINT/HUGEINT and value objects for DECIMAL/TIMESTAMP/etc.; left
+ * as-is these break JSON.stringify when the inspection is written to disk.
+ */
+function jsonSafe(v: unknown): unknown {
+  if (v === null || v === undefined) return v;
+  if (typeof v === "bigint") return Number(v);
+  if (v instanceof Date) return v.toISOString();
+  if (Array.isArray(v)) return v.map(jsonSafe);
+  if (typeof v === "object") return String(v); // DECIMAL/TIMESTAMP value objects → their string form
+  return v;
+}
+
 // ── DuckDBConnector ─────────────────────────────────────────────
 
 export class DuckDBConnector implements Connector {
@@ -128,7 +142,13 @@ export class DuckDBConnector implements Connector {
   private async rows(sql: string): Promise<Record<string, unknown>[]> {
     const c = await this.getConn();
     const reader = await c.runAndReadAll(sql);
-    return reader.getRowObjects() as Record<string, unknown>[];
+    const raw = reader.getRowObjects() as Record<string, unknown>[];
+    // Normalize cells to JSON-safe primitives (no BigInt / driver value objects).
+    return raw.map((row) => {
+      const out: Record<string, unknown> = {};
+      for (const k of Object.keys(row)) out[k] = jsonSafe(row[k]);
+      return out;
+    });
   }
 
   private quoteIdent(name: string): string {

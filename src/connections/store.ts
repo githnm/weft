@@ -38,8 +38,17 @@ export interface PostgresRecord extends BaseRecord {
 
 export interface BigQueryRecord extends BaseRecord {
   type: "bigquery";
+  /** BILLING/compute project — who pays for and runs the query. */
   project_id: string;
   location: string;
+  /**
+   * DATA project — where the dataset physically lives. For your own data this
+   * equals the billing project; for PUBLIC datasets it differs (e.g.
+   * "bigquery-public-data"). Defaults to project_id when blank.
+   */
+  data_project?: string;
+  /** The dataset to introspect (e.g. "google_analytics_sample"). */
+  dataset?: string;
   /**
    * Optional PATH to a service-account key file (NOT the key contents).
    * When omitted, auth uses gcloud Application Default Credentials.
@@ -111,6 +120,10 @@ export interface ConnectionMeta {
   ssl?: boolean;
   project_id?: string;
   location?: string;
+  /** BigQuery data project (where the dataset lives; may differ from billing). */
+  data_project?: string;
+  /** BigQuery dataset to introspect. */
+  dataset?: string;
   /** Whether a key-file path is configured (the path itself is shown, not a secret). */
   key_file_path?: string;
   // duckdb
@@ -135,6 +148,15 @@ function configDir(): string {
 
 function storePath(): string {
   return path.join(configDir(), "connections.json");
+}
+
+/**
+ * Each connection owns its OWN substrate (introspection output), so building a
+ * model from a datasource reads exactly that datasource's schema — never a
+ * different connection's. Deterministic from the connection id.
+ */
+export function connectionSubstrateDir(id: string): string {
+  return path.join(configDir(), "substrates", id);
 }
 
 async function readStore(): Promise<StoreFile> {
@@ -165,8 +187,11 @@ function maskOf(r: ConnectionRecord): string {
     case "postgres":
     case "mysql":
       return `${r.user}@${r.host}:${r.port}/${r.database}`;
-    case "bigquery":
-      return `${r.project_id}${r.location ? ` (${r.location})` : ""}`;
+    case "bigquery": {
+      const data = r.data_project && r.data_project !== r.project_id ? `${r.data_project}.` : "";
+      const ds = r.dataset ? `${data}${r.dataset}` : r.project_id;
+      return `${ds}${r.location ? ` (${r.location})` : ""}`;
+    }
     case "duckdb":
       return r.file_path;
     case "snowflake":
@@ -189,7 +214,7 @@ export function toMeta(r: ConnectionRecord, activeId: string | null): Connection
     case "mysql":
       return { ...base, host: r.host, port: r.port, database: r.database, user: r.user, ssl: r.ssl };
     case "bigquery":
-      return { ...base, project_id: r.project_id, location: r.location, key_file_path: r.key_file_path };
+      return { ...base, project_id: r.project_id, location: r.location, data_project: r.data_project, dataset: r.dataset, key_file_path: r.key_file_path };
     case "duckdb":
       return { ...base, file_path: r.file_path };
     case "snowflake":
@@ -254,6 +279,8 @@ export interface AddBigQueryInput {
   name: string;
   project_id: string;
   location?: string;
+  data_project?: string;
+  dataset?: string;
   key_file_path?: string;
 }
 
@@ -313,6 +340,8 @@ export async function addConnection(input: AddInput): Promise<ConnectionMeta> {
       id, name: input.name, type: "bigquery", created_at,
       project_id: input.project_id.trim(),
       location: (input.location || "US").trim(),
+      ...(input.data_project?.trim() ? { data_project: input.data_project.trim() } : {}),
+      ...(input.dataset?.trim() ? { dataset: input.dataset.trim() } : {}),
       ...(input.key_file_path?.trim() ? { key_file_path: input.key_file_path.trim() } : {}),
     };
   } else if (input.type === "duckdb") {
@@ -391,7 +420,12 @@ export interface ResolvedSnowflakeOptions {
 export interface ResolvedMalloyOptions {
   connectorKind: ConnectorKind;
   postgresUrl?: string;
+  /** BigQuery billing/compute project. */
   billingProject?: string;
+  /** BigQuery data project (where the dataset lives; defaults to billing). */
+  dataProject?: string;
+  /** BigQuery dataset. */
+  dataset?: string;
   location?: string;
   duckdbPath?: string;
   mysqlUrl?: string;
@@ -404,7 +438,13 @@ export function recordToMalloyOptions(r: ConnectionRecord): ResolvedMalloyOption
     case "postgres":
       return { connectorKind: "postgres", postgresUrl: toPostgresUrl(r) };
     case "bigquery":
-      return { connectorKind: "bigquery", billingProject: r.project_id, location: r.location };
+      return {
+        connectorKind: "bigquery",
+        billingProject: r.project_id,
+        dataProject: r.data_project || r.project_id,
+        dataset: r.dataset,
+        location: r.location,
+      };
     case "duckdb":
       return { connectorKind: "duckdb", duckdbPath: r.file_path };
     case "mysql":

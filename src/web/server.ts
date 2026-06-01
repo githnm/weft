@@ -18,6 +18,7 @@ import "dotenv/config";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import Fastify from "fastify";
 import fastifyStatic from "@fastify/static";
@@ -31,7 +32,7 @@ import { resolveModelsDir, resolveBillingProject, detectConnectorKind } from "..
 import { resolveSemanticModelsDir, resolveModelDir, resolveSubstrateDir } from "../models/manifest.js";
 import { listModels, showModel } from "../models/registry.js";
 import { parseModelItems } from "../interview/compile.js";
-import { proposeModelPlan } from "../interview/plan.js";
+import { proposeTables, generateDecisionsForTables } from "../interview/plan.js";
 import { buildModelWithClarification } from "../interview/build.js";
 import { refineModel, saveRefinement } from "../interview/refine.js";
 import { bakeDefinition } from "../interview/definitions.js";
@@ -49,16 +50,50 @@ import {
   deleteConnection,
   getConnection,
   setActiveConnection,
+  toPostgresUrl,
+  toMySQLUrl,
+  connectionSubstrateDir,
 } from "../connections/store.js";
 import type { ConnectionRecord, AddInput } from "../connections/store.js";
-import { testConnectionRecord } from "../connections/test.js";
+import { testConnectionRecord, explainConnectionError } from "../connections/test.js";
 import { syncActiveConnection } from "../connections/runtime.js";
+import { createConnector } from "../connectors/factory.js";
+import type { Connector } from "../connectors/types.js";
+import { runIntrospect } from "../cli/commands/introspect.js";
 import { classifyCorrection } from "../correct/classify.js";
 import { prepareTermUpdate, applyTermUpdate } from "../correct/term-update.js";
 import { prepareModelSuggestion, logModelSuggestion } from "../correct/model-suggest.js";
 
 const PORT = Number(process.env.WEB_PORT ?? 4000);
 const BQ_COST_PER_TB = 6.25;
+
+// ── Introspection jobs (async, in-memory; one process serves the UI) ──
+// A scan can take minutes on a large dataset, so it runs as a background job
+// the UI polls for progress — never a blocking request that would time out.
+interface IntrospectJob {
+  id: string;
+  connectionId: string;
+  status: "running" | "done" | "error";
+  stage: string;
+  message: string;
+  tablesTotal: number | null;
+  tablesDone: number | null;
+  result: {
+    substrateDir: string;
+    datasetProject: string;
+    datasetName: string;
+    billingProject: string;
+    tableCount: number;
+    skippedCount: number;
+    bytesScanned: number;
+    warnings: string[];
+  } | null;
+  error: string | null;
+  startedAt: string;
+  updatedAt: string;
+}
+const introspectJobs = new Map<string, IntrospectJob>();
+const runningJobByConnection = new Map<string, string>();
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const clientDist = path.resolve(here, "../../web/dist");
@@ -227,6 +262,8 @@ async function buildServer() {
     // bigquery
     project_id?: string;
     location?: string;
+    data_project?: string;
+    dataset?: string;
     key_file_path?: string;
     // duckdb
     file_path?: string;
@@ -263,7 +300,16 @@ async function buildServer() {
     if (b.type === "bigquery") {
       const project_id = (b.project_id ?? "").trim();
       if (!project_id) return { ok: false, error: "project_id is required" };
-      return { ok: true, input: { type: "bigquery", name, project_id, location: (b.location ?? "US").trim() || "US", key_file_path: b.key_file_path?.trim() || undefined } };
+      return {
+        ok: true,
+        input: {
+          type: "bigquery", name, project_id,
+          location: (b.location ?? "US").trim() || "US",
+          data_project: b.data_project?.trim() || undefined,
+          dataset: b.dataset?.trim() || undefined,
+          key_file_path: b.key_file_path?.trim() || undefined,
+        },
+      };
     }
 
     if (b.type === "duckdb") {
@@ -309,7 +355,7 @@ async function buildServer() {
       case "mysql":
         return { ...base, name: input.name, type: "mysql", host: input.host, port: input.port ?? 3306, database: input.database, user: input.user, password: input.password, ssl: input.ssl ?? false };
       case "bigquery":
-        return { ...base, name: input.name, type: "bigquery", project_id: input.project_id, location: input.location || "US", key_file_path: input.key_file_path };
+        return { ...base, name: input.name, type: "bigquery", project_id: input.project_id, location: input.location || "US", data_project: input.data_project, dataset: input.dataset, key_file_path: input.key_file_path };
       case "duckdb":
         return { ...base, name: input.name, type: "duckdb", file_path: input.file_path };
       case "snowflake":
@@ -317,10 +363,25 @@ async function buildServer() {
     }
   }
 
-  // GET — metadata ONLY (never the password).
+  // GET — metadata ONLY (never the password). Enriched with each connection's
+  // own substrate dir + whether it's been introspected (has inspection.json),
+  // so the model builder can show a datasource selector with ready/not state.
   app.get("/api/connections", async () => {
     const { active_id, metas } = await listConnections();
-    return normalizeValue({ activeId: active_id, connections: metas });
+    const enriched = await Promise.all(
+      metas.map(async (m) => {
+        const dir = connectionSubstrateDir(m.id);
+        let hasSubstrate = false;
+        try {
+          await fsp.access(path.join(dir, "inspection.json"));
+          hasSubstrate = true;
+        } catch {
+          /* not introspected yet */
+        }
+        return { ...m, substrateDir: dir, hasSubstrate };
+      }),
+    );
+    return normalizeValue({ activeId: active_id, connections: enriched });
   });
 
   // POST — add a connection; persists locally, returns metadata only.
@@ -364,6 +425,160 @@ async function buildServer() {
     }
     await syncActiveConnection();
     return normalizeValue({ activated: req.params.id });
+  });
+
+  // POST /:id/introspect — START a background introspection job for this
+  // connection and return immediately with a job id. The actual scan can take
+  // minutes; the client polls /api/introspect/:jobId/status for live progress.
+  // For BigQuery this uses the THREE-project split: data project (where the
+  // dataset lives) + dataset for the SOURCE, billing project for COMPUTE.
+  app.post<{ Params: { id: string }; Body: { sample_rows?: number } }>(
+    "/api/connections/:id/introspect",
+    async (req, reply) => {
+      const record = await getConnection(req.params.id);
+      if (!record) {
+        reply.code(404);
+        return { error: "Connection not found." };
+      }
+      if (record.type === "bigquery" && !record.dataset?.trim()) {
+        reply.code(400);
+        return { error: "This BigQuery connection has no dataset. Edit it and set the Dataset to introspect." };
+      }
+
+      // Coalesce double-clicks: if a scan is already running, return its id.
+      const existingId = runningJobByConnection.get(record.id);
+      if (existingId && introspectJobs.get(existingId)?.status === "running") {
+        return normalizeValue({ jobId: existingId });
+      }
+
+      const jobId = `job_${randomUUID().slice(0, 8)}`;
+      const now = new Date().toISOString();
+      const job: IntrospectJob = {
+        id: jobId,
+        connectionId: record.id,
+        status: "running",
+        stage: "connecting",
+        message: "Connecting to the warehouse…",
+        tablesTotal: null,
+        tablesDone: null,
+        result: null,
+        error: null,
+        startedAt: now,
+        updatedAt: now,
+      };
+      introspectJobs.set(jobId, job);
+      runningJobByConnection.set(record.id, jobId);
+
+      const outputDir = connectionSubstrateDir(record.id);
+      const sampleRows = Number(req.body?.sample_rows) || 1000;
+
+      const onProgress = (p: { stage: string; message: string; tablesTotal?: number; tablesDone?: number }) => {
+        const j = introspectJobs.get(jobId);
+        if (!j) return;
+        j.stage = p.stage;
+        j.message = p.message;
+        if (p.tablesTotal !== undefined) j.tablesTotal = p.tablesTotal;
+        if (p.tablesDone !== undefined) j.tablesDone = p.tablesDone;
+        j.updatedAt = new Date().toISOString();
+      };
+
+      // Run in the background — do NOT await. The request returns right away.
+      void (async () => {
+        let connector: Connector | undefined;
+        let restoreCreds: (() => void) | null = null;
+        try {
+          if (record.type === "bigquery") {
+            if (record.key_file_path) {
+              const prev = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+              process.env.GOOGLE_APPLICATION_CREDENTIALS = record.key_file_path;
+              restoreCreds = () => {
+                if (prev === undefined) delete process.env.GOOGLE_APPLICATION_CREDENTIALS;
+                else process.env.GOOGLE_APPLICATION_CREDENTIALS = prev;
+              };
+            }
+            connector = createConnector({
+              kind: "bigquery",
+              project: record.data_project?.trim() || record.project_id, // DATA project (source)
+              dataset: record.dataset!.trim(),
+              billingProject: record.project_id, // BILLING project (compute)
+              location: record.location,
+            });
+          } else if (record.type === "postgres") {
+            connector = createConnector({ kind: "postgres", connectionString: toPostgresUrl(record), schema: "public" });
+          } else if (record.type === "mysql") {
+            connector = createConnector({ kind: "mysql", connectionString: toMySQLUrl(record) });
+          } else if (record.type === "duckdb") {
+            connector = createConnector({ kind: "duckdb", filePath: record.file_path });
+          } else {
+            connector = createConnector({
+              kind: "snowflake",
+              account: record.account, username: record.username, warehouse: record.warehouse,
+              database: record.database, schema: record.schema, role: record.role,
+              password: record.password, privateKeyPath: record.private_key_path,
+              privateKeyPassphrase: record.private_key_passphrase,
+            });
+          }
+
+          await runIntrospect(connector, outputDir, { sampleRows, onProgress });
+          await connector.close().catch(() => {});
+
+          const insp = JSON.parse(await fsp.readFile(path.join(outputDir, "inspection.json"), "utf-8")) as InspectionResult;
+          const j = introspectJobs.get(jobId);
+          if (j) {
+            j.status = "done";
+            j.stage = "done";
+            j.message = `Ready — ${insp.tables.length} table${insp.tables.length === 1 ? "" : "s"} introspected.`;
+            j.tablesDone = j.tablesTotal ?? insp.tables.length;
+            j.result = {
+              substrateDir: outputDir,
+              datasetProject: insp.dataset_project,
+              datasetName: insp.dataset_name,
+              billingProject: insp.billing_project,
+              tableCount: insp.tables.length,
+              skippedCount: insp.skipped_tables.length,
+              bytesScanned: insp.bytes_scanned,
+              warnings: insp.warnings ?? [],
+            };
+            j.updatedAt = new Date().toISOString();
+          }
+        } catch (err) {
+          await connector?.close?.().catch(() => {});
+          const j = introspectJobs.get(jobId);
+          if (j) {
+            j.status = "error";
+            j.error = explainConnectionError(err);
+            j.message = "Introspection failed.";
+            j.updatedAt = new Date().toISOString();
+          }
+        } finally {
+          restoreCreds?.();
+          if (runningJobByConnection.get(record.id) === jobId) runningJobByConnection.delete(record.id);
+        }
+      })();
+
+      reply.code(202);
+      return normalizeValue({ jobId });
+    },
+  );
+
+  // GET /api/introspect/:jobId/status — poll an introspection job's progress.
+  app.get<{ Params: { jobId: string } }>("/api/introspect/:jobId/status", async (req, reply) => {
+    const job = introspectJobs.get(req.params.jobId);
+    if (!job) {
+      reply.code(404);
+      return { error: "Job not found." };
+    }
+    return normalizeValue({
+      id: job.id,
+      connectionId: job.connectionId,
+      status: job.status,
+      stage: job.stage,
+      message: job.message,
+      tablesTotal: job.tablesTotal,
+      tablesDone: job.tablesDone,
+      result: job.result,
+      error: job.error,
+    });
   });
 
   // DELETE — remove from the local config file.
@@ -420,6 +635,7 @@ async function buildServer() {
         name: detail.name,
         purpose: detail.purpose,
         connector: detail.connector_kind ?? null,
+        datasource: detail.manifest.datasource ?? null,
         measures: items.filter((i) => i.kind === "measure").map((i) => ({ name: i.name, expr: i.expr })),
         dimensions: items.filter((i) => i.kind === "dimension").map((i) => ({ name: i.name, expr: i.expr })),
         views,
@@ -678,8 +894,10 @@ async function buildServer() {
     },
   );
 
-  // Design — step 1: propose a plan (relevant tables + decisions).
-  // Thin wrapper over proposeModelPlan (the same function `model design` calls).
+  // Design — step 1: propose TABLES only (relevant + excluded).
+  // Decisions are intentionally NOT generated here. They are generated in step
+  // 1.5 (/decisions) from the user's FINALIZED table set, so they never
+  // reference a dropped table or miss an added one.
   app.post<{ Body: { name?: string; purpose?: string; substrate_dir?: string; tables?: string[] } }>(
     "/api/models/design/plan",
     async (req, reply) => {
@@ -694,7 +912,7 @@ async function buildServer() {
           reply.code(400);
           return { error: substrateNotFoundMessage(substrateDir) };
         }
-        const plan = await proposeModelPlan(purpose, substrateDir);
+        const plan = await proposeTables(purpose, substrateDir);
 
         // Optional constraint: "use only these tables".
         let relevant = plan.relevant_tables;
@@ -738,7 +956,43 @@ async function buildServer() {
           excludedCount: excluded,
           allTables,
           tableSelectionReasoning: plan.table_selection_reasoning,
-          decisions: plan.decisions.map((d) => ({
+          // Decisions are generated later, from the finalized table set.
+          decisions: [],
+        });
+      } catch (err) {
+        reply.code(500);
+        return { error: err instanceof Error ? err.message : String(err) };
+      }
+    },
+  );
+
+  // Design — step 1.5: generate decisions FROM the user's finalized table set.
+  // Called when the user clicks Continue on the Tables step. The decisions are
+  // built from EXACTLY the tables passed in (proposed minus dropped plus added),
+  // so dropped tables can never appear in an option and added tables are
+  // considered. Regenerated whenever the finalized set changes.
+  app.post<{ Body: { purpose?: string; substrate_dir?: string; tables?: string[] } }>(
+    "/api/models/design/decisions",
+    async (req, reply) => {
+      const purpose = (req.body?.purpose ?? "").trim();
+      if (!purpose) {
+        reply.code(400);
+        return { error: "purpose is required" };
+      }
+      const tables = (req.body?.tables ?? []).map((t) => `${t}`.trim()).filter(Boolean);
+      if (tables.length === 0) {
+        reply.code(400);
+        return { error: "at least one table must be selected" };
+      }
+      try {
+        const substrateDir = resolveSubstrate(req.body?.substrate_dir);
+        if (!hasInspection(substrateDir)) {
+          reply.code(400);
+          return { error: substrateNotFoundMessage(substrateDir) };
+        }
+        const { decisions } = await generateDecisionsForTables(purpose, substrateDir, tables);
+        return normalizeValue({
+          decisions: decisions.map((d) => ({
             id: d.id,
             question: d.question,
             explanation: d.why_it_matters,
@@ -771,6 +1025,8 @@ async function buildServer() {
       substrate_dir?: string;
       semantic_models_dir?: string;
       clarifications?: { question: string; answer: string }[];
+      /** Human label of the datasource (connection) this model is built from. */
+      datasource?: string;
     };
   }>("/api/models/design/build", async (req, reply) => {
     const name = (req.body?.name ?? "").trim();
@@ -816,6 +1072,20 @@ async function buildServer() {
         surfaceQuestions: clarifications.length === 0,
         maxClarifyRounds: 2,
       });
+
+      // Record which datasource this model was built from (provenance). Patched
+      // directly onto the manifest so we don't thread it through the whole build.
+      const datasource = req.body?.datasource?.trim();
+      if (datasource && result.model_dir) {
+        try {
+          const manifestPath = path.join(result.model_dir, "model.json");
+          const manifest = JSON.parse(await fsp.readFile(manifestPath, "utf-8"));
+          manifest.datasource = datasource;
+          await fsp.writeFile(manifestPath, JSON.stringify(manifest, null, 2) + "\n", "utf-8");
+        } catch {
+          /* provenance is best-effort — never fail the build over it */
+        }
+      }
 
       return normalizeValue({
         success: result.success,
