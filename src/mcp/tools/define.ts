@@ -19,8 +19,8 @@ export function register(server: McpServer): void {
       source: z.string().optional().describe("Source .malloy filename to attach the term to (auto-detected if omitted)"),
       confirm: z.boolean().default(false).describe("If true, confirm a pending auto-proposed term instead of creating a new one"),
       model_name: z.string().optional().describe("Named semantic model to attach the term to (e.g. 'product_usage'). Use this whenever the user is working with a semantic model — terms MUST be saved in the model's own directory so ask_question(model_name) can apply them."),
-      semantic_models_dir: z.string().optional().describe("Path to semantic-models directory (default: ./semantic-models). Used with model_name."),
-      models_dir: z.string().optional().describe("Path to models/substrate directory (default: ./models or $DEFAULT_MODELS_DIR). Ignored when model_name is set."),
+      semantic_models_dir: z.string().optional().describe("Path to semantic-models directory (default: $WEFT_HOME/models). Used with model_name."),
+      models_dir: z.string().optional().describe("Path to models/substrate directory (default: $WEFT_HOME/substrate). Ignored when model_name is set."),
       billing_project: z.string().optional().describe("GCP billing project (BigQuery only, default: $BQ_PROJECT_ID). Not needed for Postgres models."),
     },
     async (args) => {
@@ -133,7 +133,7 @@ export function register(server: McpServer): void {
       definition: z.string().describe("The concept in plain English (e.g. 'external_users = exclude internal accounts and test workspaces')"),
       aliases: z.array(z.string()).optional().describe("Other words for the SAME concept — explicit, user-confirmed only (e.g. ['users','customers','accounts']). Do NOT include unconfirmed guesses."),
       canonical_name: z.string().optional().describe("Optional canonical name for the concept; otherwise derived from the baked field."),
-      semantic_models_dir: z.string().optional().describe("Path to semantic-models directory (default: ./semantic-models)"),
+      semantic_models_dir: z.string().optional().describe("Path to semantic-models directory (default: $WEFT_HOME/models)"),
       billing_project: z.string().optional().describe("GCP billing project (BigQuery only, default: $BQ_PROJECT_ID). Not needed for Postgres."),
     },
     async (args) => {

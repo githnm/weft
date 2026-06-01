@@ -17,9 +17,9 @@ export function register(server: McpServer): void {
     "Answer a natural-language analytical question by generating and running a Malloy query against the introspected dataset. The engine selects a source, checks feasibility, generates Malloy, executes against BigQuery, and verifies the result. Use this as the default tool for any analytical question. When model_name is provided, only the tables in that semantic model are visible. Do NOT use for schema work (introspect_warehouse), corrections (correct_answer), or term definitions (define_term).",
     {
       question: z.string().describe("Natural-language analytical question"),
-      models_dir: z.string().optional().describe("Path to models directory (default: ./models or $DEFAULT_MODELS_DIR). Ignored when model_name is set."),
+      models_dir: z.string().optional().describe("Path to models directory (default: $WEFT_HOME/substrate). Ignored when model_name is set."),
       model_name: z.string().optional().describe("Named semantic model to query (e.g. 'sales'). The agent only sees tables in this model."),
-      semantic_models_dir: z.string().optional().describe("Path to semantic-models directory (default: ./semantic-models). Used with model_name."),
+      semantic_models_dir: z.string().optional().describe("Path to semantic-models directory (default: $WEFT_HOME/models). Used with model_name."),
       billing_project: z.string().optional().describe("GCP billing project (BigQuery only, default: $BQ_PROJECT_ID). Not needed for Postgres models."),
       source: z.string().optional().describe("Override automatic source selection with this source name or filename"),
       show_malloy: z.boolean().default(true).describe("Include the generated Malloy query in the output"),

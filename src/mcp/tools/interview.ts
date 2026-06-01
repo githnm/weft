@@ -18,7 +18,7 @@ export function register(server: McpServer): void {
         "One-line description of what the model is for (e.g. 'Analyze bikeshare trip patterns and station utilization')",
       ),
       substrate_dir: z.string().optional().describe(
-        "Path to substrate directory (default: ./substrate or $DEFAULT_SUBSTRATE_DIR). Must contain inspection.json from introspect_warehouse.",
+        "Path to substrate directory (default: $WEFT_HOME/substrate). Must contain inspection.json from introspect_warehouse.",
       ),
     },
     async (args) => {
@@ -88,10 +88,10 @@ export function register(server: McpServer): void {
         reason: z.string().describe("Why this table is included"),
       })).describe("Tables to include (from propose_model_plan output)"),
       substrate_dir: z.string().optional().describe(
-        "Path to substrate directory (default: ./substrate or $DEFAULT_SUBSTRATE_DIR)",
+        "Path to substrate directory (default: $WEFT_HOME/substrate)",
       ),
       semantic_models_dir: z.string().optional().describe(
-        "Path to semantic-models directory (default: ./semantic-models or $DEFAULT_SEMANTIC_MODELS_DIR)",
+        "Path to semantic-models directory (default: $WEFT_HOME/models)",
       ),
       billing_project: z.string().optional().describe(
         "GCP billing project for Malloy compilation (BigQuery only, default: $BQ_PROJECT_ID). Not needed for Postgres substrates.",

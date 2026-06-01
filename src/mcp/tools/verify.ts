@@ -18,7 +18,7 @@ export function register(server: McpServer): void {
     "verify_models",
     "Compile every .malloy file in the models directory and report pass/fail per file. Use this after manually editing a .malloy file, or to debug introspection problems. Do NOT use this to answer questions; it does not execute queries against BigQuery.",
     {
-      models_dir: z.string().optional().describe("Path to models directory (default: ./models or $DEFAULT_MODELS_DIR)"),
+      models_dir: z.string().optional().describe("Path to models directory (default: $WEFT_HOME/substrate)"),
       billing_project: z.string().optional().describe("GCP billing project (BigQuery only, default: $BQ_PROJECT_ID). Not needed for Postgres models."),
     },
     async (args) => {
@@ -111,7 +111,7 @@ export function register(server: McpServer): void {
     "refresh_metadata",
     "Regenerate models/metadata.json from the existing inspection.json without re-querying BigQuery. Use this when inspection.json has been edited manually, or to apply changes to the metadata schema. Cheap, no BigQuery cost.",
     {
-      models_dir: z.string().optional().describe("Path to models directory (default: ./models or $DEFAULT_MODELS_DIR)"),
+      models_dir: z.string().optional().describe("Path to models directory (default: $WEFT_HOME/substrate)"),
     },
     async (args) => {
       try {

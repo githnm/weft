@@ -1,14 +1,17 @@
 /**
  * Shared configuration resolution for MCP tools.
  *
- * Reads defaults from environment variables; tool inputs override.
+ * All directories resolve through WEFT_HOME (see ../config/home.ts); tool
+ * inputs override. No per-tool path is needed for the common case.
  */
 
 import fs from "node:fs/promises";
 import path from "node:path";
+import { weftSubstrateDir } from "../config/home.js";
 
+/** Raw-substrate dir for an ask without a named model. */
 export function resolveModelsDir(input?: string): string {
-  return input || process.env.DEFAULT_MODELS_DIR || "./models";
+  return input || weftSubstrateDir();
 }
 
 /**

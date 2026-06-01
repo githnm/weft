@@ -15,7 +15,7 @@ export function register(server: McpServer): void {
     "Apply a user correction to the most recent query result. Updates terms.json for filter corrections, or surfaces a suggested .malloy edit for model-level corrections. Shows before/after with numeric impact. Use this when the user says an answer is wrong, should exclude/include something, or expresses disagreement with the agent's interpretation. Requires a prior ask_question to correct against.",
     {
       correction_text: z.string().describe("The correction (e.g. 'students should exclude trips under 2 min')"),
-      models_dir: z.string().optional().describe("Path to models directory (default: ./models or $DEFAULT_MODELS_DIR)"),
+      models_dir: z.string().optional().describe("Path to models directory (default: $WEFT_HOME/substrate)"),
       billing_project: z.string().optional().describe("GCP billing project (BigQuery only, default: $BQ_PROJECT_ID). Not needed for Postgres models."),
       source: z.string().optional().describe("Target source file (auto-detected from session if omitted)"),
       no_impact: z.boolean().default(false).describe("Skip numeric impact calculation (faster)"),

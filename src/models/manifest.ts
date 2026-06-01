@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { weftModelsDir, weftSubstrateDir } from "../config/home.js";
 import type { DesignProvenance, RefinementRecord } from "../interview/types.js";
 
 // ── Types ────────────────────────────────────────────────────────
@@ -88,22 +89,17 @@ export function resolveModelDir(semanticModelsDir: string, modelName: string): s
 }
 
 /**
- * Resolve the substrate directory, applying defaults.
- * Priority: explicit arg > DEFAULT_SUBSTRATE_DIR > DEFAULT_MODELS_DIR > ./substrate
- *
- * Falls back to DEFAULT_MODELS_DIR because MCP server configurations
- * often set DEFAULT_MODELS_DIR as a catch-all for the working directory.
- * This prevents the agent from defaulting to an empty ./substrate and
- * triggering unnecessary introspection when a substrate already exists.
+ * Resolve the substrate directory.
+ * Priority: explicit arg > $WEFT_HOME/substrate (default <repo>/.weft/substrate).
  */
 export function resolveSubstrateDir(explicit?: string): string {
-  return explicit ?? process.env.DEFAULT_SUBSTRATE_DIR ?? process.env.DEFAULT_MODELS_DIR ?? "./substrate";
+  return explicit ?? weftSubstrateDir();
 }
 
 /**
- * Resolve the semantic models directory, applying defaults.
- * Priority: explicit arg > env var > ./semantic-models
+ * Resolve the semantic models directory.
+ * Priority: explicit arg > $WEFT_HOME/models (default <repo>/.weft/models).
  */
 export function resolveSemanticModelsDir(explicit?: string): string {
-  return explicit ?? process.env.DEFAULT_SEMANTIC_MODELS_DIR ?? "./semantic-models";
+  return explicit ?? weftModelsDir();
 }

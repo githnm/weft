@@ -16,8 +16,8 @@ export function register(server: McpServer): void {
       name: z.string().describe("Name for the model (becomes directory name, e.g. 'sales')"),
       purpose: z.string().describe("One-line purpose description (e.g. 'Sales team KPIs and pipeline analysis')"),
       tables: z.array(z.string()).describe("Table names to include (must exist in substrate)"),
-      substrate_dir: z.string().optional().describe("Path to substrate directory (default: ./substrate or $DEFAULT_SUBSTRATE_DIR)"),
-      semantic_models_dir: z.string().optional().describe("Path to semantic-models directory (default: ./semantic-models or $DEFAULT_SEMANTIC_MODELS_DIR)"),
+      substrate_dir: z.string().optional().describe("Path to substrate directory (default: $WEFT_HOME/substrate)"),
+      semantic_models_dir: z.string().optional().describe("Path to semantic-models directory (default: $WEFT_HOME/models)"),
     },
     async (args) => {
       try {
@@ -56,7 +56,7 @@ export function register(server: McpServer): void {
     "list_models",
     "List all named semantic models. Use this when the user wants to see available models, or before suggesting which model to query.",
     {
-      semantic_models_dir: z.string().optional().describe("Path to semantic-models directory (default: ./semantic-models or $DEFAULT_SEMANTIC_MODELS_DIR)"),
+      semantic_models_dir: z.string().optional().describe("Path to semantic-models directory (default: $WEFT_HOME/models)"),
     },
     async (args) => {
       try {
@@ -95,7 +95,7 @@ export function register(server: McpServer): void {
     "Show detailed information about a specific semantic model, including its tables, files, and configuration.",
     {
       name: z.string().describe("Name of the model to show"),
-      semantic_models_dir: z.string().optional().describe("Path to semantic-models directory (default: ./semantic-models or $DEFAULT_SEMANTIC_MODELS_DIR)"),
+      semantic_models_dir: z.string().optional().describe("Path to semantic-models directory (default: $WEFT_HOME/models)"),
     },
     async (args) => {
       try {
@@ -145,7 +145,7 @@ export function register(server: McpServer): void {
     "Delete a named semantic model. This removes the model directory and all its contents (terms, corrections, session). The substrate is not affected.",
     {
       name: z.string().describe("Name of the model to delete"),
-      semantic_models_dir: z.string().optional().describe("Path to semantic-models directory (default: ./semantic-models or $DEFAULT_SEMANTIC_MODELS_DIR)"),
+      semantic_models_dir: z.string().optional().describe("Path to semantic-models directory (default: $WEFT_HOME/models)"),
     },
     async (args) => {
       try {
@@ -174,7 +174,7 @@ export function register(server: McpServer): void {
     "list_substrate_tables",
     "Start here to check what's available. Lists all tables in the substrate directory by reading inspection.json from disk — does not connect to the database. Use this before propose_model_plan to confirm a substrate exists, or to discover which tables can be included when creating a semantic model. If no substrate is found, the user should run introspection via CLI (`pnpm cli introspect`) first.",
     {
-      substrate_dir: z.string().optional().describe("Path to substrate directory (default: ./substrate or $DEFAULT_SUBSTRATE_DIR)"),
+      substrate_dir: z.string().optional().describe("Path to substrate directory (default: $WEFT_HOME/substrate)"),
     },
     async (args) => {
       try {

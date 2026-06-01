@@ -17,6 +17,7 @@
     "dev": "tsc && node dist/index.js",
     "cli": "tsc && node dist/cli/index.js",
     "mcp": "tsc && node dist/mcp/server.js",
+    "mcp:config": "npx tsx scripts/mcp-config.ts",
     "web": "tsc && pnpm --dir web build && node dist/web/server.js",
     "web:api": "tsc && node dist/web/server.js",
     "test:syntax": "npx tsx scripts/test-malloy-forms.ts",

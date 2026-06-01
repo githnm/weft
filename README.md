@@ -164,7 +164,15 @@ Both show the change and its impact before saving, and keep a one-step undo.
 
 This is the intended way to use it day to day. Weft runs as an MCP server; your IDE drives the conversation.
 
-Add to your IDE's MCP config (Claude Desktop: `~/Library/Application Support/Claude/claude_desktop_config.json`):
+**Generate the config — don't hand-write it.** Run:
+
+```bash
+pnpm mcp:config
+```
+
+It prints a ready-to-paste block with the absolute path to *this* clone's
+server already filled in. Copy it into your IDE's MCP config, replace the
+API key, and restart. The output looks like:
 
 ```json
 {
@@ -172,19 +180,28 @@ Add to your IDE's MCP config (Claude Desktop: `~/Library/Application Support/Cla
     "weft": {
       "command": "node",
       "args": ["/absolute/path/to/weft/dist/mcp/server.js"],
-      "env": {
-        "ANTHROPIC_API_KEY": "sk-ant-...",
-        "POSTGRES_URL": "postgresql://user:pass@host:5432/db?sslmode=no-verify",
-        "DEFAULT_MODELS_DIR": "/absolute/path/to/weft/substrate"
-      }
+      "env": { "ANTHROPIC_API_KEY": "sk-ant-..." }
     }
   }
 }
 ```
 
+Paste it into:
+- **Claude Desktop:** `~/Library/Application Support/Claude/claude_desktop_config.json`
+- **Cursor:** `~/.cursor/mcp.json`
+
+(If the file already has an `"mcpServers"` object, add just the `"weft"` entry inside it.)
+
+**No model path to set.** Models and substrates live under `WEFT_HOME` (default
+`<repo>/.weft`), resolved from the server's own location — so it finds your
+models no matter where the IDE launches it. Build a model in the web app
+(`pnpm web`) or the CLI; the MCP server picks it up. Datasource credentials come
+from the connection you marked active in the web app — they don't go in the
+config. (Set `WEFT_HOME` only if you want to relocate that directory.)
+
 Restart the IDE fully (quit, do not just close the window), then talk to it:
 
-> Use my existing substrate. Design a semantic model for product usage with the recommended options, then tell me which workspaces have the most activity.
+> List my models, then tell me which workspaces have the most activity.
 
 ## The web app
 

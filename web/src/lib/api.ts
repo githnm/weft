@@ -87,6 +87,30 @@ export async function fetchHealth(): Promise<Health> {
   return r.json();
 }
 
+// ── MCP connect (server-computed config block for Claude Desktop) ──
+
+export interface McpConfig {
+  serverName: string;
+  /** Absolute path to dist/mcp/server.js for THIS install. */
+  serverPath: string;
+  /** Whether the built server exists (false → run `pnpm build`). */
+  serverExists: boolean;
+  /** The resolved models location the server actually uses. */
+  modelsDir: string;
+  weftHome: string;
+  /** OS-specific claude_desktop_config.json location. */
+  configPath: string;
+  placeholderKey: string;
+  /** The `"weft": { ... }` fragment to MERGE into the user's mcpServers. */
+  blockText: string;
+}
+
+export async function fetchMcpConfig(): Promise<McpConfig> {
+  const r = await fetch("/api/mcp-config");
+  if (!r.ok) throw new Error(`Could not load MCP config (${r.status})`);
+  return r.json();
+}
+
 // ── Connections (credentials stored locally on the server; metadata only here) ──
 
 export type ConnectorType = "postgres" | "bigquery" | "duckdb" | "mysql" | "snowflake";

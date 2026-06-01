@@ -11,7 +11,7 @@ export function register(server: McpServer): void {
     "show_session",
     "Return the current session state: last question, source, filters, group-by, aggregates, time range, last result summary. Use this to understand what context the next ask_question will inherit. Returns null if no session exists.",
     {
-      models_dir: z.string().optional().describe("Path to models directory (default: ./models or $DEFAULT_MODELS_DIR)"),
+      models_dir: z.string().optional().describe("Path to models directory (default: $WEFT_HOME/substrate)"),
     },
     async (args) => {
       try {
@@ -80,7 +80,7 @@ export function register(server: McpServer): void {
     "clear_session",
     "Delete the current session state. Use this when the user wants to start a fresh conversation, switch topics, or before asking an unrelated question that shouldn't inherit prior context.",
     {
-      models_dir: z.string().optional().describe("Path to models directory (default: ./models or $DEFAULT_MODELS_DIR)"),
+      models_dir: z.string().optional().describe("Path to models directory (default: $WEFT_HOME/substrate)"),
     },
     async (args) => {
       try {

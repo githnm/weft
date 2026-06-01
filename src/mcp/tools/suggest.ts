@@ -14,7 +14,7 @@ export function register(server: McpServer): void {
     "suggest_metrics",
     "Use an LLM to suggest additional measures, views, and named filters for the introspected models. Each suggestion is validated against the model. Returns a list of compiling and failing suggestions with reasoning. Use this when the user wants ideas for what to measure, or when starting fresh on a new dataset. Do NOT use this to answer specific questions (use ask_question).",
     {
-      models_dir: z.string().optional().describe("Path to models directory (default: ./models or $DEFAULT_MODELS_DIR)"),
+      models_dir: z.string().optional().describe("Path to models directory (default: $WEFT_HOME/substrate)"),
       billing_project: z.string().optional().describe("GCP billing project (BigQuery only, default: $BQ_PROJECT_ID). Not needed for Postgres models."),
       max_suggestions: z.number().default(15).describe("Maximum number of suggestions to generate"),
     },

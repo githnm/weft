@@ -62,8 +62,8 @@ export function register(server: McpServer): void {
     "Read the engine's decision trace — the 'event clock' of every decision (asks, corrections, term definitions, model design/refinement, feasibility refusals), with the reasoning, outcome, and links between them. Use to understand WHY past answers were given, what was corrected, and how decisions relate. Filter by decision type, outcome status, referenced entity (table/term/measure), or time. Read-only.",
     {
       model_name: z.string().optional().describe("Semantic model whose history to read. Omit to read substrate-level history."),
-      semantic_models_dir: z.string().optional().describe("Path to semantic-models directory (default: ./semantic-models). Used with model_name."),
-      models_dir: z.string().optional().describe("Path to models/substrate directory (default: ./models). Used when model_name is omitted."),
+      semantic_models_dir: z.string().optional().describe("Path to semantic-models directory (default: $WEFT_HOME/models). Used with model_name."),
+      models_dir: z.string().optional().describe("Path to models/substrate directory (default: $WEFT_HOME/substrate). Used when model_name is omitted."),
       decision_type: z.enum(DECISION_TYPES).optional().describe("Filter to one decision type"),
       status: z.enum(OUTCOME_STATUSES).optional().describe("Filter to one outcome status"),
       entity: z.string().optional().describe("Substring match against observation/reasoning/action (e.g. a term, measure, or table name)"),
@@ -110,7 +110,7 @@ export function register(server: McpServer): void {
     {
       model_name: z.string().describe("Name of the semantic model to simulate against"),
       proposed_change: z.string().describe("The change in plain English (e.g. 'active_users should require at least 2 events', 'drop the workspaces join')"),
-      semantic_models_dir: z.string().optional().describe("Path to semantic-models directory (default: ./semantic-models)"),
+      semantic_models_dir: z.string().optional().describe("Path to semantic-models directory (default: $WEFT_HOME/models)"),
       billing_project: z.string().optional().describe("GCP billing project (BigQuery only, default: $BQ_PROJECT_ID). Not needed for Postgres models."),
       location: z.string().default("US").describe("BigQuery dataset region"),
     },
@@ -209,7 +209,7 @@ export function register(server: McpServer): void {
     "Render a model's decision trace history as a self-contained interactive HTML graph (force-directed; nodes colored by decision type, bordered by outcome, with edges showing which decisions influenced which). Returns the full HTML — save it to a .html file and open it in a browser. Read-only.",
     {
       model_name: z.string().describe("Name of the semantic model whose traces to visualize"),
-      semantic_models_dir: z.string().optional().describe("Path to semantic-models directory (default: ./semantic-models)"),
+      semantic_models_dir: z.string().optional().describe("Path to semantic-models directory (default: $WEFT_HOME/models)"),
     },
     async (args) => {
       try {

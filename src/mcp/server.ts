@@ -14,42 +14,27 @@
  *
  * Environment variables:
  *   ANTHROPIC_API_KEY              Required for LLM calls
+ *   WEFT_HOME                      Optional. Where Weft keeps models/substrates
+ *                                  (default: <repo>/.weft, resolved from this
+ *                                  file's location — no need to set it).
  *   BQ_PROJECT_ID                  Default billing project (BigQuery)
  *   GOOGLE_APPLICATION_CREDENTIALS BigQuery authentication
  *   POSTGRES_URL                   Postgres connection string (required for Postgres)
  *   CLAUDE_MODEL                   Override default LLM model
- *   DEFAULT_MODELS_DIR             Default models / substrate directory
- *   DEFAULT_SUBSTRATE_DIR          Override substrate directory specifically
- *   DEFAULT_SEMANTIC_MODELS_DIR    Override semantic-models directory
  *
- * IDE Configuration:
+ * Models are auto-discovered under WEFT_HOME — connect a datasource and build a
+ * model in the web app, and this server finds it with NO path configuration.
  *
- * For Cursor (~/.cursor/mcp.json) or Claude Desktop (claude_desktop_config.json):
+ * IDE Configuration: generate the exact, valid block with `pnpm mcp:config`
+ * and paste it into your IDE's MCP config (Claude Desktop:
+ * claude_desktop_config.json; Cursor: ~/.cursor/mcp.json). It looks like:
  *
  *   {
  *     "mcpServers": {
- *       "agentic-analytics": {
+ *       "weft": {
  *         "command": "node",
- *         "args": ["/absolute/path/to/dist/mcp/server.js"],
- *         "env": {
- *           "ANTHROPIC_API_KEY": "sk-ant-...",
- *           "BQ_PROJECT_ID": "my-gcp-project",
- *           "GOOGLE_APPLICATION_CREDENTIALS": "/path/to/key.json",
- *           "POSTGRES_URL": "postgres://user:pass@host:5432/db?sslmode=require",
- *           "DEFAULT_MODELS_DIR": "/path/to/substrate"
- *         }
- *       }
- *     }
- *   }
- *
- * Or after npm publish:
- *
- *   {
- *     "mcpServers": {
- *       "agentic-analytics": {
- *         "command": "npx",
- *         "args": ["-y", "agentic-analytics-mcp"],
- *         "env": { ... }
+ *         "args": ["/absolute/path/to/weft/dist/mcp/server.js"],
+ *         "env": { "ANTHROPIC_API_KEY": "sk-ant-..." }
  *       }
  *     }
  *   }
@@ -60,6 +45,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { registerAllTools } from "./tools/index.js";
 import { setServer } from "./progress.js";
+import { syncActiveConnection } from "../connections/runtime.js";
 
 // ── Redirect console.log → stderr ────────────────────────────
 // Engine functions use console.log freely for progress and debugging.
@@ -80,8 +66,13 @@ setServer(server);
 // Register all 25 tools
 registerAllTools(server);
 
+// Adopt the active datasource saved in the web app (WEFT_HOME/connections.json):
+// overlays its credentials onto the env so queries work with NO extra config.
+// No-op if nothing is configured — explicit env vars still take effect.
+await syncActiveConnection().catch(() => {});
+
 // ── Connect via STDIO ────────────────────────────────────────
 const transport = new StdioServerTransport();
 await server.connect(transport);
 
-console.error("[agentic-analytics] MCP server started on stdio");
+console.error("[weft] MCP server started on stdio");

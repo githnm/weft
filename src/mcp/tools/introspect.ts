@@ -32,7 +32,7 @@ export function register(server: McpServer): void {
       sf_role: z.string().optional().describe("Snowflake role (optional)"),
       sf_password: z.string().optional().describe("Snowflake password (or use sf_key for key-pair auth)"),
       sf_key: z.string().optional().describe("Snowflake private key file path (key-pair auth)"),
-      models_dir: z.string().optional().describe("Output directory for models (default: ./substrate or $DEFAULT_SUBSTRATE_DIR). Previously called 'models', now defaults to substrate for the two-layer architecture."),
+      models_dir: z.string().optional().describe("Output directory for models (default: $WEFT_HOME/substrate). Previously called 'models', now defaults to substrate for the two-layer architecture."),
       billing_project: z.string().optional().describe("GCP billing project (BigQuery only, default: $BQ_PROJECT_ID)"),
       location: z.string().default("US").describe("BigQuery dataset region (e.g. US, EU, asia-northeast1)"),
       sample_rows: z.number().default(1000).describe("Number of sample rows per table"),
@@ -126,8 +126,8 @@ export function register(server: McpServer): void {
               "Introspection exceeded 90s timeout. This operation is too heavy for an IDE tool call.\n\n" +
               "Run via CLI instead:\n" +
               (args.connector === "postgres"
-                ? "  pnpm cli introspect --connector postgres --connection-string $POSTGRES_URL --output ./substrate"
-                : `  pnpm cli introspect --connector bigquery --project ${args.project ?? "<project>"} --dataset ${args.dataset ?? "<dataset>"} --output ./substrate`) +
+                ? "  pnpm cli introspect --connector postgres --connection-string $POSTGRES_URL"
+                : `  pnpm cli introspect --connector bigquery --project ${args.project ?? "<project>"} --dataset ${args.dataset ?? "<dataset>"}`) +
               "\n\nThen use list_substrate_tables and propose_model_plan to work with the substrate.",
             );
           }

@@ -12,7 +12,7 @@ export function register(server: McpServer): void {
     "list_corrections",
     "List all corrections applied to the model, with timestamps, types (term_update or model_suggestion), and descriptions. Use this when the user wants to see what corrections have been made or to find a correction ID for rollback.",
     {
-      models_dir: z.string().optional().describe("Path to models directory (default: ./models or $DEFAULT_MODELS_DIR)"),
+      models_dir: z.string().optional().describe("Path to models directory (default: $WEFT_HOME/substrate)"),
     },
     async (args) => {
       try {
@@ -57,7 +57,7 @@ export function register(server: McpServer): void {
     "Reverse a previously applied term correction by restoring the prior filter. Requires the correction_id from list_corrections. Does NOT roll back model_suggestion type corrections (those are manual edits that must be undone manually).",
     {
       correction_id: z.string().describe("The correction ID to rollback (from list_corrections)"),
-      models_dir: z.string().optional().describe("Path to models directory (default: ./models or $DEFAULT_MODELS_DIR)"),
+      models_dir: z.string().optional().describe("Path to models directory (default: $WEFT_HOME/substrate)"),
     },
     async (args) => {
       try {

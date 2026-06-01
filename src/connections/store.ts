@@ -13,6 +13,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { weftHome } from "../config/home.js";
 import type { ConnectorKind } from "../connectors/types.js";
 
 // ── Records (stored on disk; include secrets) ────────────────────
@@ -139,11 +140,9 @@ export interface ConnectionMeta {
 
 // ── Storage location ─────────────────────────────────────────────
 
-/** Project-local .weft dir (gitignored). Override with WEFT_CONFIG_DIR. */
+/** The Weft home dir (default <repo>/.weft). Override with WEFT_HOME. */
 function configDir(): string {
-  return process.env.WEFT_CONFIG_DIR
-    ? path.resolve(process.env.WEFT_CONFIG_DIR)
-    : path.resolve(process.cwd(), ".weft");
+  return weftHome();
 }
 
 function storePath(): string {

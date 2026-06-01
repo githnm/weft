@@ -23,6 +23,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { MalloyBlock } from "@/components/malloy-block";
+import { McpConnect } from "@/components/mcp-connect";
 import { VerificationCallout } from "@/components/verification-callout";
 import { DeleteModelDialog } from "@/components/delete-model-dialog";
 import { ModelEditor } from "./model-editor";
@@ -1142,6 +1143,9 @@ function ResultView({
       )}
 
       {outcome.modelMalloy && <MalloyBlock code={outcome.modelMalloy} label="model.malloy" />}
+
+      {/* Built — offer to wire it into Claude Desktop right away. */}
+      {outcome.success && <McpConnect defaultOpen />}
 
       <div className="flex justify-end gap-2">
         {!clean && (

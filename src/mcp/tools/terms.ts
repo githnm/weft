@@ -11,7 +11,7 @@ export function register(server: McpServer): void {
     "list_terms",
     "List all confirmed business terms with their filters and usage counts. Use this when the user asks what terms are defined, or to inspect the current vocabulary. Returns structured data.",
     {
-      models_dir: z.string().optional().describe("Path to models directory (default: ./models or $DEFAULT_MODELS_DIR)"),
+      models_dir: z.string().optional().describe("Path to models directory (default: $WEFT_HOME/substrate)"),
     },
     async (args) => {
       try {
@@ -83,7 +83,7 @@ export function register(server: McpServer): void {
     "Remove a confirmed business term from terms.json. Use this when the user explicitly wants to remove a term. Asks for confirmation via the response, not interactively.",
     {
       term: z.string().describe("The term key to delete"),
-      models_dir: z.string().optional().describe("Path to models directory (default: ./models or $DEFAULT_MODELS_DIR)"),
+      models_dir: z.string().optional().describe("Path to models directory (default: $WEFT_HOME/substrate)"),
     },
     async (args) => {
       try {

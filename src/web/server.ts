@@ -30,6 +30,7 @@ import { estimateCost, formatCost } from "../llm/anthropic.js";
 import { formatBytes } from "../mcp/format.js";
 import { resolveModelsDir, resolveBillingProject, detectConnectorKind } from "../mcp/config.js";
 import { resolveSemanticModelsDir, resolveModelDir, resolveSubstrateDir } from "../models/manifest.js";
+import { repoRoot, weftHome } from "../config/home.js";
 import { listModels, showModel } from "../models/registry.js";
 import { parseModelItems } from "../interview/compile.js";
 import { proposeTables, generateDecisionsForTables } from "../interview/plan.js";
@@ -111,13 +112,12 @@ function resolveAskDir(modelName?: string): string {
 }
 
 /**
- * The configured substrate directory (no per-request override). Priority:
- *   WEFT_SUBSTRATE_DIR > DEFAULT_SUBSTRATE_DIR > DEFAULT_MODELS_DIR > ./substrate
- * A substrate can live anywhere (prod-models, posthog-substrate, …) — it is
- * never assumed to be ./substrate beyond the final fallback.
+ * The configured substrate directory (no per-request override): $WEFT_HOME/
+ * substrate. In normal use a substrate comes from the selected datasource (a
+ * per-connection substrate under $WEFT_HOME/substrates/<id>), passed explicitly.
  */
 function configuredSubstrateDir(): string {
-  return path.resolve(process.env.WEFT_SUBSTRATE_DIR || resolveSubstrateDir());
+  return path.resolve(resolveSubstrateDir());
 }
 
 /** Resolve the substrate for a design request: explicit body field, else config. */
@@ -164,9 +164,8 @@ async function modelSources(
 function substrateNotFoundMessage(dir: string): string {
   return (
     `No substrate found at "${dir}" — inspection.json is missing there. ` +
-    `Point at your introspected substrate via the "Substrate directory" field, ` +
-    `or set the WEFT_SUBSTRATE_DIR env var (DEFAULT_SUBSTRATE_DIR / DEFAULT_MODELS_DIR also work). ` +
-    `If you haven't introspected yet, run \`pnpm cli introspect\`.`
+    `Pick a datasource and introspect it first (Connections → Introspect), ` +
+    `which writes its substrate under $WEFT_HOME. `
   );
 }
 
@@ -227,6 +226,39 @@ function toAskResult(r: AskResult, question: string) {
 
 async function buildServer() {
   const app = Fastify({ logger: false });
+
+  // MCP connect — server-computed config block for claude_desktop_config.json.
+  // Paths are absolute and correct for THIS install (resolved from the server's
+  // own location). Returns just the "weft" server ENTRY to merge into the
+  // user's existing mcpServers — never a whole file to clobber. The API key is
+  // a placeholder; the real key is never embedded.
+  app.get("/api/mcp-config", async () => {
+    const serverPath = path.join(repoRoot(), "dist", "mcp", "server.js");
+    const placeholderKey = "<your-key-here>";
+    const entry = {
+      command: "node",
+      args: [serverPath],
+      env: { ANTHROPIC_API_KEY: placeholderKey },
+    };
+    // The exact fragment to nest INSIDE the user's "mcpServers": { ... }.
+    const blockText = `"weft": ${JSON.stringify(entry, null, 2)}`;
+    const configPath =
+      process.platform === "darwin"
+        ? "~/Library/Application Support/Claude/claude_desktop_config.json"
+        : process.platform === "win32"
+          ? "%APPDATA%\\Claude\\claude_desktop_config.json"
+          : "~/.config/Claude/claude_desktop_config.json";
+    return normalizeValue({
+      serverName: "weft",
+      serverPath,
+      serverExists: fs.existsSync(serverPath),
+      modelsDir: resolveSemanticModelsDir(),
+      weftHome: weftHome(),
+      configPath,
+      placeholderKey,
+      blockText,
+    });
+  });
 
   // Health
   app.get("/api/health", async () => {

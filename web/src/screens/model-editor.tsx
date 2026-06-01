@@ -22,6 +22,7 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { MalloyBlock } from "@/components/malloy-block";
 import { SemanticDiagram } from "@/components/semantic-diagram";
+import { McpConnect } from "@/components/mcp-connect";
 import { DeleteModelDialog } from "@/components/delete-model-dialog";
 import {
   agentTurn,
@@ -114,6 +115,9 @@ export function ModelEditor({
               Delete
             </button>
           </header>
+
+          {/* Connect this model to Claude Desktop via MCP (collapsed by default). */}
+          <McpConnect defaultOpen={false} />
 
           {/* Split pane: left ≈58% (the model), right ≈42% (change it), min 380px.
               minmax(0,…) stops the wide code block from blowing out the left track. */}

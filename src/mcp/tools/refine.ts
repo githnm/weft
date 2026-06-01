@@ -19,7 +19,7 @@ export function register(server: McpServer): void {
         "'change the active definition to require 5 events', 'drop the role join')",
       ),
       semantic_models_dir: z.string().optional().describe(
-        "Path to semantic-models directory (default: ./semantic-models or $DEFAULT_SEMANTIC_MODELS_DIR)",
+        "Path to semantic-models directory (default: $WEFT_HOME/models)",
       ),
       billing_project: z.string().optional().describe(
         "GCP billing project for Malloy compilation (BigQuery only, default: $BQ_PROJECT_ID). Not needed for Postgres models.",
@@ -163,7 +163,7 @@ export function register(server: McpServer): void {
     {
       model_name: z.string().describe("Name of the semantic model to revert"),
       semantic_models_dir: z.string().optional().describe(
-        "Path to semantic-models directory (default: ./semantic-models or $DEFAULT_SEMANTIC_MODELS_DIR)",
+        "Path to semantic-models directory (default: $WEFT_HOME/models)",
       ),
     },
     async (args) => {

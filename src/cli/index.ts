@@ -40,7 +40,7 @@ program
 program
   .command("introspect")
   .description("Introspect a warehouse dataset and generate Malloy model files")
-  .option("--output <dir>", "Output directory for generated files (default: ./substrate or $DEFAULT_SUBSTRATE_DIR)")
+  .option("--output <dir>", "Output directory for generated files (default: $WEFT_HOME/substrate)")
   .option("--connector <type>", "Connector type: bigquery, postgres, duckdb, mysql, or snowflake", "bigquery")
   .option("--project <project>", "GCP project that owns the dataset (BigQuery)")
   .option("--dataset <dataset>", "BigQuery dataset name (BigQuery)")
@@ -312,9 +312,9 @@ program
   .command("ask")
   .description("Ask a natural-language question and get results from BigQuery via Malloy")
   .argument("<question>", "Natural-language question to answer")
-  .option("--models <dir>", "Directory containing .malloy files (default: ./substrate or $DEFAULT_MODELS_DIR)")
+  .option("--models <dir>", "Directory containing .malloy files (default: $WEFT_HOME/substrate)")
   .option("--model <name>", "Named semantic model to query (e.g. 'sales'). Only that model's tables are visible.")
-  .option("--semantic-models <dir>", "Parent directory for semantic models (default: ./semantic-models)")
+  .option("--semantic-models <dir>", "Parent directory for semantic models (default: $WEFT_HOME/models)")
   .option("--billing-project <project>", "GCP project for billing (defaults to BQ_PROJECT_ID env var)")
   .option("--source <source>", "Skip source selection; use this source directly")
   .option("--show-malloy", "Print the generated Malloy query")
@@ -359,7 +359,7 @@ program
       const semanticModelsDir = resolveSemanticModelsDir(opts.semanticModels);
       modelsDir = path.resolve(path.join(semanticModelsDir, opts.model));
     } else {
-      modelsDir = opts.models ?? process.env.DEFAULT_MODELS_DIR ?? resolveSubstrateDir();
+      modelsDir = opts.models ?? resolveSubstrateDir();
     }
 
     try {
@@ -424,8 +424,8 @@ program
   .option("--description <desc>", "Description of the term (for manual mode)")
   .option("--source <file>", "Source .malloy filename to attach the term to")
   .option("--model <name>", "Named semantic model to attach the term to (terms save in that model's dir, where 'ask --model' reads them)")
-  .option("--semantic-models <dir>", "Parent directory for semantic models (default: ./semantic-models)")
-  .option("--models <dir>", "Directory containing .malloy files (default: ./models or $DEFAULT_MODELS_DIR). Ignored when --model is set.")
+  .option("--semantic-models <dir>", "Parent directory for semantic models (default: $WEFT_HOME/models)")
+  .option("--models <dir>", "Directory containing .malloy files (default: $WEFT_HOME/substrate). Ignored when --model is set.")
   .option("--billing-project <project>", "GCP project for billing (defaults to BQ_PROJECT_ID env var)")
   .action(async (term: string, opts: {
     confirm?: boolean;
@@ -443,7 +443,7 @@ program
       const semanticModelsDir = resolveSemanticModelsDir(opts.semanticModels);
       modelsDir = path.resolve(path.join(semanticModelsDir, opts.model));
     } else {
-      modelsDir = opts.models ?? process.env.DEFAULT_MODELS_DIR ?? resolveSubstrateDir();
+      modelsDir = opts.models ?? resolveSubstrateDir();
     }
 
     const billingProject = opts.billingProject ?? process.env.BQ_PROJECT_ID;
@@ -534,8 +534,8 @@ program
   .description("Apply a correction to a term or suggest a model edit")
   .argument("<text>", "Correction text (e.g. 'students should exclude trips under 2 min')")
   .option("--model <name>", "Named semantic model to correct (e.g. 'product_usage'). Only that model's dir is used.")
-  .option("--semantic-models <dir>", "Parent directory for semantic models (default: ./semantic-models)")
-  .option("--models <dir>", "Directory containing .malloy files (default: ./models or $DEFAULT_MODELS_DIR). Ignored when --model is set.")
+  .option("--semantic-models <dir>", "Parent directory for semantic models (default: $WEFT_HOME/models)")
+  .option("--models <dir>", "Directory containing .malloy files (default: $WEFT_HOME/substrate). Ignored when --model is set.")
   .option("--billing-project <project>", "GCP project for billing (defaults to BQ_PROJECT_ID env var)")
   .option("--source <source>", "Target source file (auto-detected from session if omitted)")
   .option("--no-impact", "Skip numeric impact calculation (faster)")
@@ -555,7 +555,7 @@ program
       const semanticModelsDir = resolveSemanticModelsDir(opts.semanticModels);
       modelsDir = path.resolve(path.join(semanticModelsDir, opts.model));
     } else {
-      modelsDir = opts.models ?? process.env.DEFAULT_MODELS_DIR ?? resolveSubstrateDir();
+      modelsDir = opts.models ?? resolveSubstrateDir();
     }
 
     const billingProject = opts.billingProject ?? process.env.BQ_PROJECT_ID;
@@ -642,8 +642,8 @@ modelCmd
   .requiredOption("--name <name>", "Name for the model (becomes directory name)")
   .requiredOption("--purpose <purpose>", "One-line purpose description")
   .requiredOption("--tables <tables...>", "Table names to include (must exist in substrate)")
-  .option("--substrate-dir <dir>", "Path to substrate directory (default: ./substrate)")
-  .option("--semantic-models-dir <dir>", "Path to semantic-models directory (default: ./semantic-models)")
+  .option("--substrate-dir <dir>", "Path to substrate directory (default: $WEFT_HOME/substrate)")
+  .option("--semantic-models-dir <dir>", "Path to semantic-models directory (default: $WEFT_HOME/models)")
   .action(async (opts: {
     name: string;
     purpose: string;
@@ -663,7 +663,7 @@ modelCmd
 modelCmd
   .command("list")
   .description("List all semantic models")
-  .option("--semantic-models-dir <dir>", "Path to semantic-models directory (default: ./semantic-models)")
+  .option("--semantic-models-dir <dir>", "Path to semantic-models directory (default: $WEFT_HOME/models)")
   .action(async (opts: { semanticModelsDir?: string }) => {
     try {
       await runModelList(opts);
@@ -678,7 +678,7 @@ modelCmd
   .command("show")
   .description("Show detailed information about a semantic model")
   .argument("<name>", "Name of the model")
-  .option("--semantic-models-dir <dir>", "Path to semantic-models directory (default: ./semantic-models)")
+  .option("--semantic-models-dir <dir>", "Path to semantic-models directory (default: $WEFT_HOME/models)")
   .action(async (name: string, opts: { semanticModelsDir?: string }) => {
     try {
       await runModelShow({ name, ...opts });
@@ -693,7 +693,7 @@ modelCmd
   .command("delete")
   .description("Delete a semantic model (does not affect the substrate)")
   .argument("<name>", "Name of the model to delete")
-  .option("--semantic-models-dir <dir>", "Path to semantic-models directory (default: ./semantic-models)")
+  .option("--semantic-models-dir <dir>", "Path to semantic-models directory (default: $WEFT_HOME/models)")
   .action(async (name: string, opts: { semanticModelsDir?: string }) => {
     try {
       await runModelDelete({ name, ...opts });
@@ -707,7 +707,7 @@ modelCmd
 modelCmd
   .command("tables")
   .description("List tables available in the substrate for model creation")
-  .option("--substrate-dir <dir>", "Path to substrate directory (default: ./substrate)")
+  .option("--substrate-dir <dir>", "Path to substrate directory (default: $WEFT_HOME/substrate)")
   .action(async (opts: { substrateDir?: string }) => {
     try {
       await runModelTables(opts);
@@ -723,8 +723,8 @@ modelCmd
   .description("Design a semantic model interactively — the LLM proposes tables and decisions, you resolve them")
   .requiredOption("--name <name>", "Name for the model (becomes directory name)")
   .requiredOption("--purpose <purpose>", "One-line purpose description")
-  .option("--substrate-dir <dir>", "Path to substrate directory (default: ./substrate)")
-  .option("--semantic-models-dir <dir>", "Path to semantic-models directory (default: ./semantic-models)")
+  .option("--substrate-dir <dir>", "Path to substrate directory (default: $WEFT_HOME/substrate)")
+  .option("--semantic-models-dir <dir>", "Path to semantic-models directory (default: $WEFT_HOME/models)")
   .option("--billing-project <project>", "GCP project for billing (defaults to BQ_PROJECT_ID env var)")
   .option("--accept-defaults", "Accept all recommended defaults without prompting")
   .action(async (opts: {
@@ -774,7 +774,7 @@ modelCmd
   .description("Refine a semantic model by adding or changing measures, dimensions, views, filters, or joins")
   .argument("<name>", "Name of the model to refine")
   .argument("<refinement>", "Natural-language change request (e.g. 'add a measure for total tool calls')")
-  .option("--semantic-models-dir <dir>", "Path to semantic-models directory (default: ./semantic-models)")
+  .option("--semantic-models-dir <dir>", "Path to semantic-models directory (default: $WEFT_HOME/models)")
   .option("--billing-project <project>", "GCP project for billing (defaults to BQ_PROJECT_ID env var)")
   .option("-y, --yes", "Apply without confirmation prompt")
   .action(async (name: string, refinement: string, opts: {
@@ -830,7 +830,7 @@ modelCmd
   .description("Simulate a proposed change across the model's whole ask history (real recomputed impact)")
   .argument("<name>", "Name of the model to simulate against")
   .argument("<change>", "Proposed change in plain English (e.g. 'active_users should require at least 2 events')")
-  .option("--semantic-models-dir <dir>", "Path to semantic-models directory (default: ./semantic-models)")
+  .option("--semantic-models-dir <dir>", "Path to semantic-models directory (default: $WEFT_HOME/models)")
   .option("--billing-project <project>", "GCP project for billing (defaults to BQ_PROJECT_ID env var)")
   .option("--location <region>", "BigQuery dataset region (e.g. US, EU, asia-northeast1)", "US")
   .action(async (name: string, change: string, opts: {
@@ -885,7 +885,7 @@ modelCmd
   .command("revert")
   .description("Revert the last refinement to a semantic model (one level of undo)")
   .argument("<name>", "Name of the model to revert")
-  .option("--semantic-models-dir <dir>", "Path to semantic-models directory (default: ./semantic-models)")
+  .option("--semantic-models-dir <dir>", "Path to semantic-models directory (default: $WEFT_HOME/models)")
   .action(async (name: string, opts: { semanticModelsDir?: string }) => {
     try {
       await runModelRevert({ name, ...opts });
@@ -905,7 +905,7 @@ contextCmd
   .command("graph")
   .description("Generate a self-contained interactive HTML view of a model's decision traces")
   .argument("<model>", "Name of the semantic model")
-  .option("--semantic-models-dir <dir>", "Path to semantic-models directory (default: ./semantic-models)")
+  .option("--semantic-models-dir <dir>", "Path to semantic-models directory (default: $WEFT_HOME/models)")
   .option("--out <file>", "Output HTML path (default: ./context-graph.html)")
   .action(async (model: string, opts: { semanticModelsDir?: string; out?: string }) => {
     try {
