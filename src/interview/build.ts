@@ -4,6 +4,7 @@ import { chat, stripCodeFences, type LLMUsage } from "../llm/anthropic.js";
 import { MALLOY_SYNTAX_RULES, MALLOY_SYNTAX_REFERENCE } from "../llm/malloy-syntax-ref.js";
 import type { ConnectorKind } from "../connectors/types.js";
 import type { InspectionResult } from "../introspect/types.js";
+import type { JoinPlan } from "./join-plan.js";
 import { createModel } from "../models/create.js";
 import { loadManifest, saveManifest } from "../models/manifest.js";
 import type { ModelManifest } from "../models/manifest.js";
@@ -42,15 +43,19 @@ MODEL GENERATION RULES:
 SELF-CONTAINED MODEL — NO IMPORTS:
 - Do NOT use import statements. The model must be entirely self-contained.
 - Declare each table source directly using the connector table expression provided in the catalog (e.g. postgres.table('public.users_data') or bigquery.table('project.dataset.table')).
-- The TABLE CATALOG contains EXACTLY the tables the user selected — no more, no fewer. Declare a top-level source for EVERY table in the catalog. Join/extend the ones the purpose needs into the primary source; any selected table that does not fit the primary join graph (see the join limit below) still gets its own standalone top-level source so it stays queryable. Do NOT silently omit a selected table, and NEVER reference a table that is not in the catalog.
+- The TABLE CATALOG contains EXACTLY the tables the user selected. NEVER reference a table that is not in the catalog.
 
-SINGLE SOURCE, MINIMAL JOINS:
-- Define exactly ONE primary source using \`extend\`. This is the model's entry point.
-- The source name should be the model name (concise, descriptive).
-- HARD LIMIT: maximum 3 joins total. If the chosen measures need more tables, pick the 3 most important joins and add a comment noting what was omitted ("// Omitted: X join — add via correction if needed").
-- HARD LIMIT: maximum 6 measures.
-- Prefer join_one over join_many. A join_many to a fact table on a non-unique key multiplies rows and can cause stack overflow during compilation. Only use join_many when the grain genuinely requires it AND the join key is selective.
-- Each joined table must be declared as its own source BEFORE the primary source, using the connector table expression directly.
+ONE FACT, JOIN IN EVERYTHING REACHABLE:
+- Define exactly ONE primary (fact) source using \`extend\` — the table the purpose centers on. The source name should be the model name.
+- Join in EVERY selected table that the catalog's FK RELATIONSHIPS connect to the fact. There is NO limit on the number of joins — do not drop or "omit for brevity" a table that has a join path.
+- Declare each joined table as its own source BEFORE the fact, and on each source declare its \`primary_key\` (the catalog's "→ primary_key" hint). Malloy needs the primary_key to compute correct symmetric aggregates across a join_many.
+- JOIN TYPE IS A CORRECTNESS DECISION, NOT A STYLE CHOICE. Read the cardinality the catalog gives each FK ("many A : one B"):
+  * Join the "one" side (its key is unique — a lookup/dimension) with **join_one**.
+  * Join the "many" side (it holds the foreign key; one fact row maps to many of its rows — e.g. one workspace → many projects) with **join_many**.
+  * Emitting join_one on a one-to-many relationship silently MISCOUNTS aggregates. Never do it.
+- FAN-OUT SAFETY: Malloy aggregates are symmetric — with primary_key declared, \`count()\` on the fact and \`alias.count()\` / \`sum(alias.field)\` on a join_many'd table compute correctly without double-counting. Do NOT hand-roll fan-out math and do NOT avoid join_many to "be safe". If a specific measure cannot be made correct under the joins, OMIT it and add a \`// caveat: <measure> omitted — not fan-out-safe\` comment rather than emit a wrong number.
+- UNJOINABLE tables: if the catalog marks a selected table UNJOINABLE, do NOT invent a join and do NOT leave it as a dangling standalone source. Omit it and add the catalog's "// UNJOINABLE: ..." comment at the top of the file so the user can specify a key or exclude it.
+- Aim for the 4–8 measures the purpose needs (no hard cap).
 
 MEASURES AND DIMENSIONS:
 - Add 3-6 measures that directly serve the stated purpose and resolved decisions. Use real column names from the catalog.
@@ -86,24 +91,33 @@ EXPRESSION RULES:
 - Coalesce: use coalesce(x, default), NOT x ?? default.
 - Null checks (repeat): \`is null\` / \`is not null\`. NEVER \`= null\` / \`!= null\` / \`<> null\`.
 
-EXAMPLE STRUCTURE (Postgres):
+EXAMPLE STRUCTURE (Postgres) — note join_one for the lookup and join_many for the one-to-many child, each joined source declaring its primary_key:
 \`\`\`malloy
-source: orders_dim is postgres.table('public.orders') extend {
+source: users_dim is postgres.table('public.users') extend {
   primary_key: id
 }
 
-source: analytics is postgres.table('public.events') extend {
-  join_one: order_info is orders_dim on order_id = order_info.id
+source: projects_dim is postgres.table('public.projects') extend {
+  primary_key: id
+}
 
-  dimension: event_date is created_at::date
-  measure: event_count is count()
-  measure: unique_orders is count(order_id)
+// FK: projects.workspace_url → workspaces.workspace_url  [many projects : one workspace]
+//     workspaces is the fact, so projects join in as join_many.
+source: workspaces is postgres.table('public.workspaces') extend {
+  primary_key: workspace_url
 
-  view: daily_summary is {
-    group_by: event_date
-    aggregate: event_count, unique_orders
-    order_by: event_date desc
-    limit: 30
+  join_one: owner is users_dim on owner_id = owner.id          // many workspaces : one user → join_one
+  join_many: projects is projects_dim on workspace_url = projects.workspace_url  // one workspace : many projects → join_many
+
+  dimension: created_month is created_at.month
+  measure: workspace_count is count()                          // count of the fact (correct under fan-out)
+  measure: total_projects is projects.count()                  // symmetric aggregate over the join_many
+  measure: active_projects is projects.count() { where: projects.status = 'active' }
+
+  view: by_month is {
+    group_by: created_month
+    aggregate: workspace_count, total_projects
+    order_by: created_month desc
   }
 }
 \`\`\`
@@ -131,9 +145,9 @@ ${MALLOY_SYNTAX_REFERENCE}
 CRITICAL RULES:
 - The model must be SELF-CONTAINED. No import statements. Declare each table source directly using the connector table expression (e.g. postgres.table('public.table_name')).
 - Keep exactly ONE primary source.
-- Maximum 2 joins (keep only the ones the top measures need). Remove the rest.
-- Maximum 4 measures. Keep the most important ones.
-- Remove join_many fan-outs — replace with simple aggregates on the primary table if possible.
+- Keep ALL joins and keep each one's join_one / join_many cardinality EXACTLY as-is. The cardinality is intentional and required for correct counts. Fix only the syntax/reference error — do NOT drop joins and do NOT convert join_many to join_one (that silently miscounts).
+- Keep \`primary_key\` declarations on every source (needed for fan-out-safe aggregates).
+- Fix a measure that references an undefined field rather than deleting it.
 - Null checks: use \`x is not null\` / \`x is null\`, NEVER \`x != null\`.
 - Avoid \`now\` for time comparisons — use literal dates or omit.
 
@@ -173,16 +187,15 @@ ${MALLOY_SYNTAX_RULES}
 
 ${MALLOY_SYNTAX_REFERENCE}
 
-SIMPLIFICATION RULES:
+SIMPLIFICATION RULES (this only runs after a genuine resource failure — timeout or stack overflow, usually a circular or very deep join chain):
 - The model must be SELF-CONTAINED. No import statements. Declare each table source directly.
 - Keep exactly ONE primary source definition.
-- Maximum 2 joins total. Remove ALL join_many — replace with simple aggregates if needed.
-- Keep at most 4 measures — the ones most critical for the purpose.
-- Keep 1-2 dimensions. Remove the rest.
-- Keep 1 view at most.
+- Keep the FK joins. Drop a join ONLY if it is the cause (a cycle, or a deep chain through tables the measures don't need), and add a \`// dropped join: <table> — caused <timeout|overflow>\` comment so it's visible. Do NOT blanket-remove join_many or flip it to join_one — that miscounts; keep cardinality correct on whatever joins remain.
+- Keep \`primary_key\` on every remaining source (fan-out-safe aggregates).
+- Trim measures/dimensions/views to the ones critical for the purpose.
 - Remove any \`now\`-based expressions.
 - Null checks: use \`x is not null\` / \`x is null\`, NEVER \`x != null\`.
-- The result must be minimal but correct. A working simple model beats a broken complex one.
+- The result must be minimal but correct. A working simpler model beats a broken complex one — but correctness of the joins that remain is non-negotiable.
 
 Return JSON (no markdown fences):
 {
@@ -463,6 +476,8 @@ export interface BuildModelOptions {
   corrective?: string;
   /** Authoritative user answers to clarification questions (rebuild input). */
   clarifications?: ClarifyAnswer[];
+  /** User-CONFIRMED join plan — the model must emit exactly these joins. */
+  joinPlan?: JoinPlan;
 }
 
 // Internal context shared across generate rounds (computed once).
@@ -480,6 +495,7 @@ interface BuildContext {
   tableCatalog: string;
   decisionsText: string;
   tableNames: string[];
+  joinPlan?: JoinPlan;
 }
 
 type GenResult =
@@ -549,6 +565,7 @@ async function buildContext(options: BuildModelOptions): Promise<BuildContext> {
     name, purpose, substrateDir, semanticModelsDir, billingProject,
     decisions, relevantTables, definitions: options.definitions ?? [],
     inspection, connectorKind, tableCatalog, decisionsText, tableNames,
+    joinPlan: options.joinPlan,
   };
 }
 
@@ -593,6 +610,27 @@ async function generateValidatedModel(
       "or standalone top-level if it doesn't fit the join graph) and NEVER reference a table outside this list. " +
       "If a resolved decision names a table that is no longer selected, ignore that part of the decision.",
   );
+  if (ctx.joinPlan) {
+    const jp = ctx.joinPlan;
+    const joinLines = jp.joins
+      .map(
+        (j) =>
+          `  - join_${j.cardinality}: ${j.table} onto ${j.onto}  ON ${j.onto}.${j.ontoKey} = ${j.table}.${j.tableKey}   (${j.inferredFrom})`,
+      )
+      .join("\n");
+    const unjoinLines = jp.unjoinable.map((u) => `  - ${u.table}: ${u.reason}`).join("\n");
+    genParts.push(
+      "CONFIRMED JOIN PLAN (the user reviewed and confirmed this — it is AUTHORITATIVE and the compiled model must match it EXACTLY):\n" +
+        `Fact (primary source): ${jp.fact}\n` +
+        `Emit EXACTLY these ${jp.joins.length} join(s), with these cardinalities and ON keys — no more, no fewer:\n` +
+        (joinLines || "  (none)") +
+        "\nDeclare primary_key on every joined source so join_many aggregates are fan-out-safe.\n" +
+        (jp.unjoinable.length > 0
+          ? "\nUNJOINABLE — do NOT join these and do NOT emit a standalone source for them. Omit each and add a top-of-file comment \"// UNJOINABLE: <table> — <reason>\":\n" +
+            unjoinLines + "\n"
+          : ""),
+    );
+  }
   genParts.push(
     `PURPOSE: ${ctx.purpose}\n\nRESOLVED DECISIONS:\n${ctx.decisionsText}\n\nGenerate a self-contained model.malloy with NO import statements. Return JSON only.`,
   );
@@ -664,7 +702,7 @@ async function generateValidatedModel(
           `TABLE CATALOG:\n\n${tableCatalog}`,
           `PURPOSE: ${ctx.purpose}`,
           `FAILED model.malloy:\n\`\`\`malloy\n${modelMalloy}\n\`\`\``,
-          `This model caused ${errorType} during compilation. Aggressively simplify: 1 source, max 2 joins (NO join_many), max 4 measures. No import statements — use table refs from the catalog. Return JSON only.`,
+          `This model caused ${errorType} during compilation — usually a circular or very deep join chain. Keep the FK joins and their join_one/join_many cardinality; drop a join ONLY if it is the cause (note it in a // comment). Keep primary_key on every source. Trim measures/dimensions to the essentials. No import statements — use table refs from the catalog. Return JSON only.`,
         ],
         maxTokens: 4096,
       });

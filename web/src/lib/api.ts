@@ -620,12 +620,46 @@ export interface PlanDecision {
   options: DecisionOption[];
 }
 
+export interface PlanColumn {
+  name: string;
+  type: string;
+  nullable: boolean;
+  distinct: number;
+  sample: string | null;
+  /** Likely a key (other tables reference it, or it's unique). */
+  isKey: boolean;
+}
+
 export interface PlanTable {
   name: string;
   rowCount: number;
   columnCount: number;
   proposed: boolean;
   reason: string;
+  columns: PlanColumn[];
+}
+
+// ── Deterministic join plan (computed from foreign keys) ─────────
+
+export interface PlannedJoin {
+  table: string;
+  onto: string;
+  cardinality: "one" | "many";
+  ontoKey: string;
+  tableKey: string;
+  inferredFrom: string;
+}
+
+export interface JoinPlan {
+  fact: string;
+  joins: PlannedJoin[];
+  unjoinable: { table: string; reason: string }[];
+  noForeignKeys: boolean;
+}
+
+export interface DecisionsResult {
+  decisions: PlanDecision[];
+  joinPlan: JoinPlan;
 }
 
 export interface DesignPlan {
@@ -662,7 +696,9 @@ export async function designDecisions(body: {
   purpose: string;
   substrate_dir?: string;
   tables: string[];
-}): Promise<PlanDecision[]> {
+  /** Optional fact override — recomputes the join plan around this table. */
+  fact?: string;
+}): Promise<DecisionsResult> {
   const r = await fetch("/api/models/design/decisions", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -670,7 +706,7 @@ export async function designDecisions(body: {
   });
   const data = await r.json();
   if (!r.ok) throw new Error(data?.error ?? `Decisions failed (${r.status})`);
-  return data.decisions as PlanDecision[];
+  return data as DecisionsResult;
 }
 
 // ── Design: build ────────────────────────────────────────────────
@@ -696,6 +732,12 @@ export interface BuildOutcome {
   clarificationsNeeded: ClarifyQuestion[];
   compileWarning: string | null;
   modelMalloy: string | null;
+  /** Joins the user confirmed (null if no plan was sent). */
+  plannedJoins: number | null;
+  /** Joins actually emitted in the compiled model.malloy. */
+  actualJoins: number | null;
+  /** Whether the compiled model matches the confirmed join count. */
+  joinPlanMatches: boolean | null;
   error: string | null;
 }
 
@@ -708,6 +750,7 @@ export async function designBuild(body: {
   substrate_dir?: string;
   clarifications?: { question: string; answer: string }[];
   datasource?: string;
+  join_plan?: JoinPlan;
 }): Promise<BuildOutcome> {
   const r = await fetch("/api/models/design/build", {
     method: "POST",

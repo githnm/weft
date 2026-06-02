@@ -86,12 +86,11 @@ EDITING RULES:
 - Preserve ALL existing definitions unless the refinement specifically asks to change or remove them.
 - DEFINITIONS: if the refinement defines a business term or segment ("customers means exclude internal accounts", "active = at least 2 events"), BAKE it in as reusable vocabulary — a boolean dimension \`is_<concept>\` for a segment, or a measure for a metric — grounded in real columns. This makes it auto-apply to future questions that mention the concept. Do NOT merely add a one-off filter to a single measure.
 - The model must remain SELF-CONTAINED. No import statements. Keep existing connector table expressions.
-- HARD LIMIT: maximum 3 joins total. If adding a join would exceed 3, warn in a comment but do not add it.
-- HARD LIMIT: maximum 6 measures total. If adding a measure would exceed 6, warn in a comment but do not add it.
+- Preserve existing joins and their join_one / join_many cardinality. Add joins when the refinement needs another table — there is no join cap.
 - Null checks: use \`x is not null\` / \`x is null\`. NEVER \`x != null\`.
 - Avoid \`now\` for time comparisons. Use literal dates or note as a comment caveat.
 - Do NOT redeclare pass-through columns that already exist on the source table.
-- Prefer join_one over join_many. join_many on non-unique keys multiplies rows.
+- JOIN CARDINALITY (correctness): join_one only when the joined table's key is unique (a lookup); join_many for one-to-many (one fact row → many joined rows). join_one on a one-to-many relationship miscounts. Each joined source must declare its \`primary_key\` so Malloy's symmetric aggregates stay fan-out-safe.
 
 OUTPUT FORMAT:
 Return a JSON object (no markdown fences, no commentary outside JSON):

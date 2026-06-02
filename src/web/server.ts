@@ -34,6 +34,7 @@ import { repoRoot, weftHome } from "../config/home.js";
 import { listModels, showModel } from "../models/registry.js";
 import { parseModelItems } from "../interview/compile.js";
 import { proposeTables, generateDecisionsForTables } from "../interview/plan.js";
+import { computeJoinPlan, countJoinsInMalloy, type JoinPlan } from "../interview/join-plan.js";
 import { buildModelWithClarification } from "../interview/build.js";
 import { refineModel, saveRefinement } from "../interview/refine.js";
 import { bakeDefinition } from "../interview/definitions.js";
@@ -962,18 +963,49 @@ async function buildServer() {
         // FULL table list — every table in the substrate, flagged proposed/not,
         // with row+column counts. The UI shows ALL of them (selected + excluded)
         // so the user can override the AI's recommendation.
-        let allTables: { name: string; rowCount: number; columnCount: number; proposed: boolean; reason: string }[] = [];
+        let allTables: {
+          name: string;
+          rowCount: number;
+          columnCount: number;
+          proposed: boolean;
+          reason: string;
+          columns: { name: string; type: string; nullable: boolean; distinct: number; sample: string | null; isKey: boolean }[];
+        }[] = [];
         try {
           const insp = JSON.parse(await fsp.readFile(path.join(substrateDir, "inspection.json"), "utf-8")) as InspectionResult;
           const proposedReason = new Map(relevant.map((t) => [t.name.toLowerCase(), t.reason ?? ""]));
+          // Columns other tables reference are definite keys (FK targets).
+          const fkTargets = new Map<string, Set<string>>();
+          for (const fk of insp.foreign_keys ?? []) {
+            const tt = fk.target_table.toLowerCase();
+            if (!fkTargets.has(tt)) fkTargets.set(tt, new Set());
+            fkTargets.get(tt)!.add(fk.target_column.toLowerCase());
+          }
+          const sampleOf = (v: unknown): string | null => {
+            if (v === null || v === undefined) return null;
+            const s = typeof v === "object" ? JSON.stringify(v) : String(v);
+            return s.length > 40 ? s.slice(0, 39) + "…" : s;
+          };
           allTables = insp.tables
-            .map((t) => ({
-              name: t.name,
-              rowCount: t.row_count,
-              columnCount: t.columns.length,
-              proposed: proposedReason.has(t.name.toLowerCase()),
-              reason: proposedReason.get(t.name.toLowerCase()) ?? "",
-            }))
+            .map((t) => {
+              const tgt = fkTargets.get(t.name.toLowerCase()) ?? new Set<string>();
+              return {
+                name: t.name,
+                rowCount: t.row_count,
+                columnCount: t.columns.length,
+                proposed: proposedReason.has(t.name.toLowerCase()),
+                reason: proposedReason.get(t.name.toLowerCase()) ?? "",
+                columns: t.columns.map((c) => ({
+                  name: c.name,
+                  type: c.type,
+                  nullable: c.nullable,
+                  distinct: c.distinct_count,
+                  sample: sampleOf(c.sample_values?.[0]),
+                  // A column is a likely key if other tables FK to it, or it's unique.
+                  isKey: tgt.has(c.name.toLowerCase()) || (t.row_count > 0 && c.distinct_count >= t.row_count),
+                })),
+              };
+            })
             // Proposed first, then alphabetical — stable, scannable order.
             .sort((a, b) => Number(b.proposed) - Number(a.proposed) || a.name.localeCompare(b.name));
         } catch {
@@ -1003,7 +1035,7 @@ async function buildServer() {
   // built from EXACTLY the tables passed in (proposed minus dropped plus added),
   // so dropped tables can never appear in an option and added tables are
   // considered. Regenerated whenever the finalized set changes.
-  app.post<{ Body: { purpose?: string; substrate_dir?: string; tables?: string[] } }>(
+  app.post<{ Body: { purpose?: string; substrate_dir?: string; tables?: string[]; fact?: string } }>(
     "/api/models/design/decisions",
     async (req, reply) => {
       const purpose = (req.body?.purpose ?? "").trim();
@@ -1022,8 +1054,14 @@ async function buildServer() {
           reply.code(400);
           return { error: substrateNotFoundMessage(substrateDir) };
         }
+        // Deterministic join plan (no LLM) — the contract the user reviews and
+        // confirms before the build. Computed from the warehouse's foreign keys.
+        const insp = JSON.parse(await fsp.readFile(path.join(substrateDir, "inspection.json"), "utf-8")) as InspectionResult;
+        const joinPlan = computeJoinPlan(insp, tables, req.body?.fact);
+
         const { decisions } = await generateDecisionsForTables(purpose, substrateDir, tables);
         return normalizeValue({
+          joinPlan,
           decisions: decisions.map((d) => ({
             id: d.id,
             question: d.question,
@@ -1059,6 +1097,8 @@ async function buildServer() {
       clarifications?: { question: string; answer: string }[];
       /** Human label of the datasource (connection) this model is built from. */
       datasource?: string;
+      /** User-confirmed join plan — the compiled model is validated against it. */
+      join_plan?: JoinPlan;
     };
   }>("/api/models/design/build", async (req, reply) => {
     const name = (req.body?.name ?? "").trim();
@@ -1101,6 +1141,7 @@ async function buildServer() {
         relevantTables,
         definitions: req.body?.definitions ?? [],
         clarifications,
+        joinPlan: req.body?.join_plan,
         surfaceQuestions: clarifications.length === 0,
         maxClarifyRounds: 2,
       });
@@ -1119,6 +1160,14 @@ async function buildServer() {
         }
       }
 
+      // Enforce the confirmed plan: the compiled model must have exactly the
+      // joins the user confirmed. Surface any divergence — never ship silently.
+      const plan = req.body?.join_plan;
+      const plannedJoins = plan ? plan.joins.length : null;
+      const actualJoins = result.model_malloy != null ? countJoinsInMalloy(result.model_malloy) : null;
+      const joinPlanMatches =
+        plannedJoins == null || actualJoins == null ? null : plannedJoins === actualJoins;
+
       return normalizeValue({
         success: result.success,
         incomplete: !!result.incomplete,
@@ -1133,6 +1182,9 @@ async function buildServer() {
         clarificationsNeeded: result.clarifications_needed ?? [],
         compileWarning: result.compile_warning ?? null,
         modelMalloy: result.model_malloy ?? null,
+        plannedJoins,
+        actualJoins,
+        joinPlanMatches,
         error: result.error ?? null,
       });
     } catch (err) {

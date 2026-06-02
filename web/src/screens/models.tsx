@@ -4,14 +4,17 @@ import {
   ArrowUpRight,
   Boxes,
   Check,
+  ChevronDown,
   ChevronRight,
   Database,
+  KeyRound,
   Loader2,
   MoreHorizontal,
   Plus,
   ScanSearch,
   Search,
   Sparkles,
+  TriangleAlert,
   Trash2,
   X,
 } from "lucide-react";
@@ -41,6 +44,7 @@ import {
   type DefinitionOutcome,
   type DesignPlan,
   type IntrospectJobStatus,
+  type JoinPlan,
   type ModelInfo,
 } from "@/lib/api";
 
@@ -338,6 +342,11 @@ function DesignWizard({
   const [choices, setChoices] = useState<Record<string, string>>({});
   // Sorted-join key of the table set the current decisions were generated from.
   const [decisionsTablesKey, setDecisionsTablesKey] = useState("");
+  // Deterministic join plan + the user's overrides (kept fact, dropped joins).
+  const [joinPlan, setJoinPlan] = useState<JoinPlan | null>(null);
+  const [factOverride, setFactOverride] = useState<string>("");
+  const [droppedJoins, setDroppedJoins] = useState<Set<string>>(new Set()); // join.table names the user excluded
+  const [expandedTable, setExpandedTable] = useState<string | null>(null); // tables-step schema expander
 
   // Step 2.5 — open custom definitions (baked into the model, with aliases)
   const [definitions, setDefinitions] = useState<{ text: string; aliases: string }[]>([]);
@@ -392,24 +401,30 @@ function DesignWizard({
   // differs from the set the current decisions were generated against, so
   // dropped tables can never linger in options and added tables are considered.
   const tablesKey = (s: Set<string>) => [...s].sort().join("|");
-  const runDecisions = async () => {
+  // Fetch decisions + the deterministic join plan for the current selection.
+  // `fact` lets the user re-root the plan around a different fact table.
+  const runDecisions = async (fact?: string, force = false) => {
     if (!plan || busy) return;
-    const key = tablesKey(selectedTables);
-    if (key === decisionsTablesKey && plan.decisions.length > 0) {
-      setStep("decisions"); // unchanged selection — reuse existing decisions
+    const key = tablesKey(selectedTables) + "|fact=" + (fact ?? "");
+    if (!force && key === decisionsTablesKey && plan.decisions.length > 0) {
+      setStep("decisions"); // unchanged — reuse
       return;
     }
     setBusy(true);
     setError(null);
     try {
-      const decisions = await designDecisions({
+      const res = await designDecisions({
         purpose: plan.purpose,
         substrate_dir: plan.substrateDir || undefined,
         tables: [...selectedTables],
+        fact,
       });
-      setPlan({ ...plan, decisions });
+      setPlan({ ...plan, decisions: res.decisions });
+      setJoinPlan(res.joinPlan);
+      setFactOverride(res.joinPlan.fact);
+      setDroppedJoins(new Set());
       const initial: Record<string, string> = {};
-      for (const d of decisions) {
+      for (const d of res.decisions) {
         const rec = d.options.find((o) => o.recommended) ?? d.options[0];
         if (rec) initial[d.id] = rec.label;
       }
@@ -421,6 +436,13 @@ function DesignWizard({
     } finally {
       setBusy(false);
     }
+  };
+
+  // Re-root the join plan around a different fact (re-fetches the plan).
+  const changeFact = (fact: string) => {
+    if (busy || fact === factOverride) return;
+    setFactOverride(fact);
+    runDecisions(fact, true);
   };
 
   const runBuild = async (extraClarification?: { question: string; answer: string }[]) => {
@@ -437,6 +459,21 @@ function DesignWizard({
         : plan.relevantTables
     ).filter((t) => selectedTables.has(t.name));
 
+    // The CONFIRMED join plan: kept joins (user-dropped ones move to unjoinable
+    // so the build omits them). This is what the compiled model is validated to.
+    const confirmedPlan: JoinPlan | undefined = joinPlan
+      ? {
+          ...joinPlan,
+          joins: joinPlan.joins.filter((j) => !droppedJoins.has(j.table)),
+          unjoinable: [
+            ...joinPlan.unjoinable,
+            ...joinPlan.joins
+              .filter((j) => droppedJoins.has(j.table))
+              .map((j) => ({ table: j.table, reason: "excluded by you in the preview" })),
+          ],
+        }
+      : undefined;
+
     try {
       // Build the structural model first (decisions + tables).
       const res = await designBuild({
@@ -447,6 +484,7 @@ function DesignWizard({
         substrate_dir: substrateDir.trim() || undefined,
         clarifications: allClarifications.length ? allClarifications : undefined,
         datasource: selectedConn?.name,
+        join_plan: confirmedPlan,
       });
       setClarifications(allClarifications);
 
@@ -685,6 +723,7 @@ function DesignWizard({
                 columnCount: 0,
                 proposed: true,
                 reason: t.reason,
+                columns: [],
               }));
         const toggle = (nameOf: string) =>
           setSelectedTables((prev) => {
@@ -700,34 +739,77 @@ function DesignWizard({
 
         const Row = (t: (typeof all)[number]) => {
           const on = selectedTables.has(t.name);
+          const open = expandedTable === t.name;
           const meta = `${t.rowCount.toLocaleString()} rows · ${t.columnCount} cols`;
+          const keyCols = (t.columns ?? []).filter((c) => c.isKey).map((c) => c.name);
           return (
-            <button
+            <div
               key={t.name}
-              onClick={() => toggle(t.name)}
               className={cn(
-                "flex items-start gap-3 rounded-md border px-3 py-2.5 text-left transition-colors",
-                on ? "border-foreground/40 bg-muted" : "border-border hover:bg-muted",
+                "rounded-md border transition-colors",
+                on ? "border-foreground/40 bg-muted" : "border-border",
               )}
             >
-              <span
-                className={cn(
-                  "mt-0.5 flex size-4 shrink-0 items-center justify-center rounded-[4px] border",
-                  on ? "border-foreground bg-foreground text-background" : "border-border",
+              <div className="flex items-start gap-3 px-3 py-2.5">
+                <button
+                  onClick={() => toggle(t.name)}
+                  className={cn(
+                    "mt-0.5 flex size-4 shrink-0 items-center justify-center rounded-[4px] border",
+                    on ? "border-foreground bg-foreground text-background" : "border-border",
+                  )}
+                >
+                  {on && <Check className="size-3" strokeWidth={2.5} />}
+                </button>
+                <button onClick={() => toggle(t.name)} className="flex min-w-0 flex-1 flex-col gap-0.5 text-left">
+                  <span className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+                    <span className="font-mono text-sm text-foreground">{t.name}</span>
+                    {t.rowCount > 0 || t.columnCount > 0 ? (
+                      <span className="font-mono text-[11px] text-muted-foreground">{meta}</span>
+                    ) : null}
+                    {keyCols.length > 0 && (
+                      <span className="text-[10px] text-tertiary">
+                        key{keyCols.length > 1 ? "s" : ""}: {keyCols.slice(0, 3).join(", ")}
+                        {keyCols.length > 3 ? "…" : ""}
+                      </span>
+                    )}
+                  </span>
+                  {t.reason && <span className="text-xs text-muted-foreground">{t.reason}</span>}
+                </button>
+                {(t.columns?.length ?? 0) > 0 && (
+                  <button
+                    onClick={() => setExpandedTable(open ? null : t.name)}
+                    className="shrink-0 text-muted-foreground transition-colors hover:text-foreground"
+                    title="Show fields"
+                  >
+                    <ChevronDown className={cn("size-4 transition-transform", open && "rotate-180")} />
+                  </button>
                 )}
-              >
-                {on && <Check className="size-3" strokeWidth={2.5} />}
-              </span>
-              <span className="flex min-w-0 flex-col gap-0.5">
-                <span className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-                  <span className="font-mono text-sm text-foreground">{t.name}</span>
-                  {t.rowCount > 0 || t.columnCount > 0 ? (
-                    <span className="font-mono text-[11px] text-muted-foreground">{meta}</span>
-                  ) : null}
-                </span>
-                {t.reason && <span className="text-xs text-muted-foreground">{t.reason}</span>}
-              </span>
-            </button>
+              </div>
+              {open && (t.columns?.length ?? 0) > 0 && (
+                <div className="flex flex-col gap-0.5 border-t border-border px-3 py-2">
+                  {t.columns.map((c) => (
+                    <div key={c.name} className="flex items-baseline gap-2 text-[11px]">
+                      {c.isKey ? (
+                        <KeyRound className="size-3 shrink-0 text-tertiary" strokeWidth={1.75} />
+                      ) : (
+                        <span className="size-3 shrink-0" />
+                      )}
+                      <span className="font-mono text-foreground">{c.name}</span>
+                      <span className="font-mono text-muted-foreground">
+                        {c.type}
+                        {c.nullable ? "" : " NOT NULL"}
+                      </span>
+                      <span className="text-tertiary">{c.distinct.toLocaleString()} distinct</span>
+                      {c.sample != null && (
+                        <span className="ml-auto min-w-0 truncate pl-2 font-mono text-muted-foreground">
+                          e.g. {c.sample}
+                        </span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           );
         };
 
@@ -786,7 +868,7 @@ function DesignWizard({
 
             <div className="flex items-center justify-between">
               <span className="text-xs text-muted-foreground">{selectedTables.size} tables selected</span>
-              <Button onClick={runDecisions} disabled={selectedTables.size === 0 || busy}>
+              <Button onClick={() => runDecisions()} disabled={selectedTables.size === 0 || busy}>
                 {busy ? <Loader2 className="size-3.5 animate-spin" /> : null}
                 {busy ? "Generating decisions…" : "Continue to decisions"}
                 {busy ? null : <ChevronRight className="size-3.5" />}
@@ -799,6 +881,29 @@ function DesignWizard({
       {/* Step 2 — decisions (the centerpiece) */}
       {step === "decisions" && plan && (
         <div className="flex flex-col gap-4">
+          {joinPlan && (
+            <JoinPlanPanel
+              plan={joinPlan}
+              dropped={droppedJoins}
+              onToggleJoin={(table) =>
+                setDroppedJoins((prev) => {
+                  const next = new Set(prev);
+                  if (next.has(table)) next.delete(table);
+                  else next.add(table);
+                  return next;
+                })
+              }
+              fact={factOverride || joinPlan.fact}
+              factOptions={[...selectedTables].sort()}
+              onChangeFact={changeFact}
+              busy={busy}
+            />
+          )}
+          {plan.decisions.length > 0 && (
+            <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+              Modeling decisions
+            </span>
+          )}
           {plan.decisions.map((d, i) => (
             <Card key={d.id}>
               <CardHeader className="gap-1.5">
@@ -926,13 +1031,40 @@ function DesignWizard({
             </div>
           </div>
 
+          {/* Final preview before commit — what's about to be built. */}
+          {joinPlan && (() => {
+            const keptJoins = joinPlan.joins.filter((j) => !droppedJoins.has(j.table));
+            const excluded = [
+              ...joinPlan.unjoinable.map((u) => u.table),
+              ...joinPlan.joins.filter((j) => droppedJoins.has(j.table)).map((j) => j.table),
+            ];
+            return (
+              <div className="flex flex-col gap-1.5 rounded-md border border-border bg-muted/40 px-3.5 py-3 text-sm">
+                <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">About to build</span>
+                <span className="text-foreground">
+                  Fact <span className="font-mono">{joinPlan.fact}</span> ·{" "}
+                  <span className="font-medium">{keptJoins.length} join{keptJoins.length === 1 ? "" : "s"}</span> ·{" "}
+                  {definitions.length} definition{definitions.length === 1 ? "" : "s"}
+                </span>
+                {excluded.length > 0 && (
+                  <span className="text-xs text-muted-foreground">
+                    Excluded (won't be joined): <span className="font-mono">{excluded.join(", ")}</span>
+                  </span>
+                )}
+                <span className="text-[11px] text-tertiary">
+                  The compiled model will have exactly these {keptJoins.length} joins — it's checked after build.
+                </span>
+              </div>
+            );
+          })()}
+
           <div className="flex items-center justify-between">
             <Button variant="ghost" size="sm" onClick={() => setStep("decisions")}>
               <ArrowLeft className="size-3.5" />
               Back
             </Button>
             <Button onClick={() => runBuild()}>
-              Build model{definitions.length > 0 ? ` (+${definitions.length} definitions)` : ""}
+              Confirm &amp; build{definitions.length > 0 ? ` (+${definitions.length} definitions)` : ""}
             </Button>
           </div>
         </div>
@@ -1073,6 +1205,22 @@ function ResultView({
         </VerificationCallout>
       )}
 
+      {/* Join-plan match check — proves the build matched what you confirmed. */}
+      {outcome.plannedJoins != null && (
+        outcome.joinPlanMatches ? (
+          <VerificationCallout kind="verified" title="Matches your confirmed plan">
+            You confirmed {outcome.plannedJoins} join{outcome.plannedJoins === 1 ? "" : "s"}; the compiled
+            model.malloy has exactly {outcome.actualJoins}.
+          </VerificationCallout>
+        ) : (
+          <VerificationCallout kind="caveat" title="Diverged from your confirmed plan">
+            You confirmed {outcome.plannedJoins} join{outcome.plannedJoins === 1 ? "" : "s"}, but the compiled
+            model has {outcome.actualJoins}. Review the model.malloy below — some joins may have been dropped
+            (e.g. a compile error) or added. Adjust the plan and rebuild.
+          </VerificationCallout>
+        )
+      )}
+
       {bakedConcepts.some((c) => c.applied) && (
         <Card>
           <CardHeader className="border-b border-border py-2.5">
@@ -1163,6 +1311,127 @@ function ResultView({
 }
 
 // ── Small helpers ────────────────────────────────────────────────
+
+// ── Join plan — visible, overridable proposal of how tables connect ──
+function JoinPlanPanel({
+  plan,
+  dropped,
+  onToggleJoin,
+  fact,
+  factOptions,
+  onChangeFact,
+  busy,
+}: {
+  plan: JoinPlan;
+  dropped: Set<string>;
+  onToggleJoin: (table: string) => void;
+  fact: string;
+  factOptions: string[];
+  onChangeFact: (fact: string) => void;
+  busy: boolean;
+}) {
+  const kept = plan.joins.filter((j) => !dropped.has(j.table));
+  return (
+    <Card>
+      <CardHeader className="gap-1 border-b border-border py-2.5">
+        <CardTitle className="flex items-center gap-2">
+          Join plan
+          <Badge variant="outline">
+            {kept.length} join{kept.length === 1 ? "" : "s"}
+          </Badge>
+        </CardTitle>
+        <CardDescription>
+          How the selected tables connect — computed from foreign keys. Review and adjust; the compiled
+          model is checked against this.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-3 pt-3">
+        <div className="flex items-center gap-2 text-sm">
+          <span className="text-muted-foreground">Fact (primary table):</span>
+          <select
+            value={fact}
+            disabled={busy}
+            onChange={(e) => onChangeFact(e.target.value)}
+            className="h-7 rounded-md border border-input bg-card px-2 font-mono text-xs text-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
+          >
+            {factOptions.map((t) => (
+              <option key={t} value={t}>
+                {t}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        {plan.noForeignKeys && (
+          <p className="rounded-md border border-warn/30 bg-warn/[0.06] px-3 py-2 text-xs text-foreground">
+            This warehouse exposes no foreign-key catalog, so joins can't be inferred deterministically. The
+            builder will match on column names — review the result carefully.
+          </p>
+        )}
+
+        {plan.joins.length > 0 ? (
+          <div className="flex flex-col gap-1.5">
+            {plan.joins.map((j) => {
+              const off = dropped.has(j.table);
+              return (
+                <div
+                  key={j.table}
+                  className={cn(
+                    "flex items-start gap-2 rounded-md border px-3 py-2",
+                    off ? "border-border bg-muted/30 opacity-60" : "border-border",
+                  )}
+                >
+                  <button
+                    onClick={() => onToggleJoin(j.table)}
+                    title={off ? "Include this join" : "Exclude this join"}
+                    className={cn(
+                      "mt-0.5 flex size-4 shrink-0 items-center justify-center rounded-[4px] border",
+                      off ? "border-border" : "border-foreground bg-foreground text-background",
+                    )}
+                  >
+                    {!off && <Check className="size-3" strokeWidth={2.5} />}
+                  </button>
+                  <div className="flex min-w-0 flex-col gap-0.5">
+                    <span className="flex flex-wrap items-center gap-1.5">
+                      <Badge variant={j.cardinality === "many" ? "warn" : "outline"}>join_{j.cardinality}</Badge>
+                      <span className="font-mono text-sm text-foreground">{j.table}</span>
+                      <span className="text-xs text-muted-foreground">
+                        onto <span className="font-mono text-foreground">{j.onto}</span> on{" "}
+                        <span className="font-mono">
+                          {j.onto}.{j.ontoKey} = {j.table}.{j.tableKey}
+                        </span>
+                      </span>
+                    </span>
+                    <span className="text-[11px] text-tertiary">{j.inferredFrom}</span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <p className="text-xs text-muted-foreground">No joins — the fact stands alone.</p>
+        )}
+
+        {plan.unjoinable.length > 0 && (
+          <div className="flex flex-col gap-1.5 rounded-md border border-warn/30 bg-warn/[0.06] px-3 py-2.5">
+            <span className="flex items-center gap-1.5 text-xs font-medium text-foreground">
+              <TriangleAlert className="size-3.5 text-warn" strokeWidth={2} /> Can't join ({plan.unjoinable.length})
+            </span>
+            {plan.unjoinable.map((u) => (
+              <span key={u.table} className="text-xs text-muted-foreground">
+                <span className="font-mono text-foreground">{u.table}</span> — {u.reason}
+              </span>
+            ))}
+            <span className="text-[11px] text-tertiary">
+              Surfaced, not silently turned into orphaned sources. Remove them on the Tables step, or add a join
+              key in your schema.
+            </span>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
 
 function WizardHeader({ step }: { step: Step }) {
   const labels: { id: Step; label: string }[] = [

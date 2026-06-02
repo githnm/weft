@@ -100,6 +100,44 @@ export function buildTableCatalog(
   const selectedSet = new Set(tableNames.map((n) => n.toLowerCase()));
   const lines: string[] = [];
 
+  // Per-table row counts + effectively-unique columns. A column is treated as a
+  // key (uniqueness ⇒ "one" side of a join) when its distinct count covers every
+  // row. Used for cardinality inference and primary_key hints below.
+  const uniqueCols = new Map<string, Set<string>>();
+  for (const t of inspection.tables) {
+    if (!selectedSet.has(t.name.toLowerCase())) continue;
+    const us = new Set<string>();
+    for (const c of t.columns) {
+      if (t.row_count > 0 && c.distinct_count >= t.row_count) us.add(c.name.toLowerCase());
+    }
+    uniqueCols.set(t.name.toLowerCase(), us);
+  }
+  // A foreign key references a unique/primary key, so every FK target column is
+  // a definite key even when sampled stats undercount its distinct values.
+  const fkTargetCols = new Map<string, Set<string>>();
+  for (const fk of inspection.foreign_keys ?? []) {
+    const tt = fk.target_table.toLowerCase();
+    if (!fkTargetCols.has(tt)) fkTargetCols.set(tt, new Set());
+    fkTargetCols.get(tt)!.add(fk.target_column.toLowerCase());
+    if (uniqueCols.has(tt)) uniqueCols.get(tt)!.add(fk.target_column.toLowerCase());
+  }
+  const isUnique = (table: string, col: string) =>
+    uniqueCols.get(table.toLowerCase())?.has(col.toLowerCase()) ?? false;
+  // Pick the best primary-key column for a table: a column other tables
+  // reference (definite key), else a key-named unique column. Never an
+  // arbitrary unique column like a timestamp.
+  const KEY_NAME = /^(id|uuid|slug|.*_id|.*_url|.*_uuid|.*_key|email|code)$/i;
+  const pickPrimaryKey = (table: string): string | undefined => {
+    const lc = table.toLowerCase();
+    const keys = [...(uniqueCols.get(lc) ?? [])];
+    const fkTargets = fkTargetCols.get(lc);
+    return (
+      keys.find((k) => fkTargets?.has(k)) ??
+      keys.find((k) => KEY_NAME.test(k)) ??
+      undefined
+    );
+  };
+
   for (const table of inspection.tables) {
     if (!selectedSet.has(table.name.toLowerCase())) continue;
 
@@ -116,6 +154,7 @@ export function buildTableCatalog(
       let desc = `    ${col.name}: ${col.type}`;
       if (col.nullable === false) desc += " NOT NULL";
       if (col.distinct_count > 0) desc += ` (${col.distinct_count} distinct)`;
+      if (isUnique(table.name, col.name)) desc += " [unique]";
       // Annotate columns that need casting for aggregation
       const safeExpr = getAggregateSafeExpression(connKind, col.name, col.type);
       if (safeExpr && safeExpr !== col.name) {
@@ -134,21 +173,73 @@ export function buildTableCatalog(
       }
     }
 
+    // Primary-key hint: Malloy needs primary_key on every source to compute
+    // correct symmetric aggregates across join_many (fan-out-safe counts/sums).
+    const pk = pickPrimaryKey(table.name);
+    if (pk) {
+      lines.push(`  → primary_key: ${pk}   (declare this; required for fan-out-safe aggregates)`);
+    }
+
     lines.push("");
   }
 
-  // Add FK relationships between selected tables
-  if (inspection.foreign_keys && inspection.foreign_keys.length > 0) {
-    const relevantFKs = inspection.foreign_keys.filter(
-      (fk) =>
-        selectedSet.has(fk.source_table.toLowerCase()) &&
-        selectedSet.has(fk.target_table.toLowerCase()),
+  // FK relationships between selected tables, ANNOTATED WITH CARDINALITY.
+  // The foreign-key direction is authoritative: the source side holds the FK
+  // ("many"), the target side is the referenced key ("one"). The join type the
+  // model must emit depends on which side the primary (fact) source is on.
+  const seenFK = new Set<string>();
+  const relevantFKs = (inspection.foreign_keys ?? []).filter((fk) => {
+    if (
+      !selectedSet.has(fk.source_table.toLowerCase()) ||
+      !selectedSet.has(fk.target_table.toLowerCase())
+    ) {
+      return false;
+    }
+    const key = `${fk.source_table}.${fk.source_column}->${fk.target_table}.${fk.target_column}`.toLowerCase();
+    if (seenFK.has(key)) return false; // drop duplicate FK rows
+    seenFK.add(key);
+    return true;
+  });
+  const connected = new Set<string>();
+
+  if (relevantFKs.length > 0) {
+    lines.push(
+      "FK RELATIONSHIPS — join EVERY one of these into the model (there is NO join limit).",
     );
-    if (relevantFKs.length > 0) {
-      lines.push("FK RELATIONSHIPS:");
-      for (const fk of relevantFKs) {
-        lines.push(`  ${fk.source_table}.${fk.source_column} → ${fk.target_table}.${fk.target_column}`);
-      }
+    lines.push(
+      "Cardinality is from the foreign-key direction; the join TYPE depends on which side your fact is on:",
+    );
+    for (const fk of relevantFKs) {
+      connected.add(fk.source_table.toLowerCase());
+      connected.add(fk.target_table.toLowerCase());
+      // A real foreign key references a unique/primary key, so the target is
+      // always the "one" side and the source (which holds the FK) is "many".
+      lines.push(
+        `  ${fk.source_table}.${fk.source_column} → ${fk.target_table}.${fk.target_column}   ` +
+          `[many ${fk.source_table} : one ${fk.target_table}]`,
+      );
+    }
+    lines.push(
+      "  Rule: if the fact is the \"many\" table, join the \"one\" table with join_one " +
+        "(on many.fk = one.pk). If the fact is the \"one\" table, join the \"many\" table with " +
+        "join_many (on one.pk = many.fk). join_one on a one-to-many relationship MISCOUNTS.",
+    );
+    lines.push("");
+  }
+
+  // Selected tables with NO foreign key to any other selected table cannot be
+  // joined — surface them rather than inventing a join or orphaning a source.
+  if (relevantFKs.length > 0 && tableNames.length > 1) {
+    const unjoinable = tableNames.filter((n) => !connected.has(n.toLowerCase()));
+    if (unjoinable.length > 0) {
+      lines.push(
+        `UNJOINABLE SELECTED TABLES (no foreign key links them to any other selected table): ${unjoinable.join(", ")}.`,
+      );
+      lines.push(
+        "  Do NOT invent a join key and do NOT leave them as dangling standalone sources. " +
+          "Omit each from the model and add a top-of-file comment: " +
+          "\"// UNJOINABLE: <table> — no join key to the fact; specify one or exclude\".",
+      );
       lines.push("");
     }
   }
